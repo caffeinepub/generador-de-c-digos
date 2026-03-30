@@ -45,6 +45,7 @@ export default function BatchSystem({
   const [imgsPerLote, setImgsPerLote] = useState(10);
   const [incremento, setIncremento] = useState(30);
   const [codigoInicioInput, setCodigoInicioInput] = useState("");
+  const [cantidadMatriculas, setCantidadMatriculas] = useState("");
   const [progress, setProgress] = useState("");
   const [generating, setGenerating] = useState(false);
 
@@ -52,6 +53,21 @@ export default function BatchSystem({
     codigoInicioInput.trim() !== ""
       ? codigoInicioInput.trim()
       : config.codigoBase;
+
+  // Calculate end code from start code + quantity
+  const computedEndCode = (() => {
+    const qty = Number.parseInt(cantidadMatriculas, 10);
+    if (!cantidadMatriculas.trim() || Number.isNaN(qty) || qty <= 0)
+      return null;
+    const { prefix, num, digits } = parseCode(effectiveStartCode);
+    return buildCode(prefix, num + qty - 1, digits);
+  })();
+
+  // When quantity mode is active, use it to compute total images
+  const useQuantityMode =
+    computedEndCode !== null &&
+    cantidadMatriculas.trim() !== "" &&
+    Number.parseInt(cantidadMatriculas, 10) > 0;
 
   async function handleGenerate() {
     setGenerating(true);
@@ -68,21 +84,48 @@ export default function BatchSystem({
       hiddenCanvas.width = 566;
       hiddenCanvas.height = 188;
 
-      for (let lote = loteDesde; lote <= loteHasta; lote++) {
-        const folder = zip.folder(`Lote_${lote}`)!;
-        setProgress(`Generando Lote ${lote} de ${loteHasta}...`);
-        for (let i = 0; i < imgsPerLote; i++) {
-          const code = buildCode(prefix, currentNum, digits);
-          if (lote === loteDesde && i === 0) codigoInicio = code;
-          codigoFin = code;
-          totalImgs++;
-          await renderBarcodeToCanvas(hiddenCanvas, code, config);
-          const dataUrl = hiddenCanvas.toDataURL("image/png");
-          const base64 = dataUrl.split(",")[1];
-          folder.file(`${code}.png`, base64, { base64: true });
-          currentNum++;
+      if (useQuantityMode) {
+        // Sequential mode: generate exactly `cantidadMatriculas` codes, split into lotes of imgsPerLote
+        const total = Number.parseInt(cantidadMatriculas, 10);
+        let remaining = total;
+        let loteNum = 1;
+
+        while (remaining > 0) {
+          const batchSize = Math.min(imgsPerLote, remaining);
+          const folder = zip.folder(`Lote_${loteNum}`)!;
+          setProgress(`Generando Lote ${loteNum}...`);
+          for (let i = 0; i < batchSize; i++) {
+            const code = buildCode(prefix, currentNum, digits);
+            if (totalImgs === 0) codigoInicio = code;
+            codigoFin = code;
+            totalImgs++;
+            await renderBarcodeToCanvas(hiddenCanvas, code, config);
+            const dataUrl = hiddenCanvas.toDataURL("image/png");
+            const base64 = dataUrl.split(",")[1];
+            folder.file(`${code}.png`, base64, { base64: true });
+            currentNum++;
+          }
+          remaining -= batchSize;
+          loteNum++;
         }
-        if (lote < loteHasta) currentNum += incremento;
+      } else {
+        // Classic lote mode
+        for (let lote = loteDesde; lote <= loteHasta; lote++) {
+          const folder = zip.folder(`Lote_${lote}`)!;
+          setProgress(`Generando Lote ${lote} de ${loteHasta}...`);
+          for (let i = 0; i < imgsPerLote; i++) {
+            const code = buildCode(prefix, currentNum, digits);
+            if (lote === loteDesde && i === 0) codigoInicio = code;
+            codigoFin = code;
+            totalImgs++;
+            await renderBarcodeToCanvas(hiddenCanvas, code, config);
+            const dataUrl = hiddenCanvas.toDataURL("image/png");
+            const base64 = dataUrl.split(",")[1];
+            folder.file(`${code}.png`, base64, { base64: true });
+            currentNum++;
+          }
+          if (lote < loteHasta) currentNum += incremento;
+        }
       }
 
       setProgress("Comprimiendo ZIP...");
@@ -93,9 +136,13 @@ export default function BatchSystem({
       const url = URL.createObjectURL(content);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `codigos_lotes_${loteDesde}_${loteHasta}.zip`;
+      a.download = `codigos_${codigoInicio}_${codigoFin}.zip`;
       a.click();
       URL.revokeObjectURL(url);
+
+      const lotesGenerados = useQuantityMode
+        ? Math.ceil(Number.parseInt(cantidadMatriculas, 10) / imgsPerLote)
+        : loteHasta - loteDesde + 1;
 
       onHistorialAdd({
         id: Date.now().toString(),
@@ -103,12 +150,12 @@ export default function BatchSystem({
         hora: new Date().toTimeString().slice(0, 5),
         codigoInicio,
         codigoFin,
-        lotes: loteHasta - loteDesde + 1,
+        lotes: lotesGenerados,
         totalImagenes: totalImgs,
       });
 
       setProgress(
-        `✅ Listo! ${totalImgs} imágenes en ${loteHasta - loteDesde + 1} lotes.`,
+        `✅ Listo! ${totalImgs} matrículas (${codigoInicio} → ${codigoFin}).`,
       );
     } catch (err) {
       setProgress(`❌ Error: ${String(err)}`);
@@ -130,14 +177,11 @@ export default function BatchSystem({
         Sistema de Lotes
       </h2>
 
-      {/* Starting code override */}
-      <div className="mb-4">
+      {/* Starting code + quantity row */}
+      <div className="mb-4 grid grid-cols-2 gap-3">
         <label className="flex flex-col gap-1">
           <span className="text-xs text-muted-foreground">
-            Código de inicio{" "}
-            <span className="text-muted-foreground/60">
-              (deja vacío para usar el código base)
-            </span>
+            Código de inicio
           </span>
           <input
             type="text"
@@ -148,67 +192,126 @@ export default function BatchSystem({
             data-ocid="batch.start_code_input"
           />
         </label>
-        {codigoInicioInput.trim() !== "" && (
-          <p
-            className="text-xs mt-1"
-            style={{ color: "oklch(0.828 0.167 87)" }}
-          >
-            Empezará desde:{" "}
-            <span className="font-mono font-semibold">
-              {effectiveStartCode}
-            </span>
-          </p>
-        )}
-      </div>
-
-      <div className="grid grid-cols-2 gap-3 mb-4">
-        <label className="flex flex-col gap-1">
-          <span className="text-xs text-muted-foreground">Lote desde</span>
-          <input
-            type="number"
-            value={loteDesde}
-            min={1}
-            onChange={(e) => setLoteDesde(Number(e.target.value))}
-            className="bg-background/40 border border-white/10 rounded-lg px-3 py-1.5 text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
-            data-ocid="batch.input"
-          />
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="text-xs text-muted-foreground">Lote hasta</span>
-          <input
-            type="number"
-            value={loteHasta}
-            min={loteDesde}
-            onChange={(e) => setLoteHasta(Number(e.target.value))}
-            className="bg-background/40 border border-white/10 rounded-lg px-3 py-1.5 text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
-            data-ocid="batch.input"
-          />
-        </label>
-        <label className="flex flex-col gap-1">
-          <span className="text-xs text-muted-foreground">Imgs por lote</span>
-          <input
-            type="number"
-            value={imgsPerLote}
-            min={1}
-            onChange={(e) => setImgsPerLote(Number(e.target.value))}
-            className="bg-background/40 border border-white/10 rounded-lg px-3 py-1.5 text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
-            data-ocid="batch.input"
-          />
-        </label>
         <label className="flex flex-col gap-1">
           <span className="text-xs text-muted-foreground">
-            Incremento por lote
+            Matrículas a generar
           </span>
           <input
             type="number"
-            value={incremento}
-            min={0}
-            onChange={(e) => setIncremento(Number(e.target.value))}
-            className="bg-background/40 border border-white/10 rounded-lg px-3 py-1.5 text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
-            data-ocid="batch.input"
+            value={cantidadMatriculas}
+            min={1}
+            onChange={(e) => setCantidadMatriculas(e.target.value)}
+            placeholder="Ej: 30"
+            className="bg-background/40 border border-white/10 rounded-lg px-3 py-1.5 text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary placeholder:text-muted-foreground/40"
+            data-ocid="batch.quantity_input"
           />
         </label>
       </div>
+
+      {/* Auto-calculated end code preview */}
+      {useQuantityMode && computedEndCode && (
+        <div
+          className="mb-4 flex items-center justify-between rounded-xl px-4 py-3"
+          style={{
+            background: "oklch(0.18 0.04 240)",
+            border: "1px solid oklch(0.828 0.167 87 / 0.3)",
+          }}
+        >
+          <div className="flex flex-col">
+            <span className="text-xs text-muted-foreground mb-0.5">
+              Secuencia calculada
+            </span>
+            <span
+              className="text-sm font-mono"
+              style={{ color: "oklch(0.828 0.167 87)" }}
+            >
+              {effectiveStartCode} → {computedEndCode}
+            </span>
+          </div>
+          <div className="text-right">
+            <span className="text-xs text-muted-foreground block mb-0.5">
+              Total
+            </span>
+            <span
+              className="text-lg font-bold"
+              style={{ color: "oklch(0.828 0.167 87)" }}
+            >
+              {cantidadMatriculas}
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Classic lote controls (only shown when quantity mode is off) */}
+      {!useQuantityMode && (
+        <div className="grid grid-cols-2 gap-3 mb-4">
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-muted-foreground">Lote desde</span>
+            <input
+              type="number"
+              value={loteDesde}
+              min={1}
+              onChange={(e) => setLoteDesde(Number(e.target.value))}
+              className="bg-background/40 border border-white/10 rounded-lg px-3 py-1.5 text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+              data-ocid="batch.input"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-muted-foreground">Lote hasta</span>
+            <input
+              type="number"
+              value={loteHasta}
+              min={loteDesde}
+              onChange={(e) => setLoteHasta(Number(e.target.value))}
+              className="bg-background/40 border border-white/10 rounded-lg px-3 py-1.5 text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+              data-ocid="batch.input"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-muted-foreground">Imgs por lote</span>
+            <input
+              type="number"
+              value={imgsPerLote}
+              min={1}
+              onChange={(e) => setImgsPerLote(Number(e.target.value))}
+              className="bg-background/40 border border-white/10 rounded-lg px-3 py-1.5 text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+              data-ocid="batch.input"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-muted-foreground">
+              Incremento por lote
+            </span>
+            <input
+              type="number"
+              value={incremento}
+              min={0}
+              onChange={(e) => setIncremento(Number(e.target.value))}
+              className="bg-background/40 border border-white/10 rounded-lg px-3 py-1.5 text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+              data-ocid="batch.input"
+            />
+          </label>
+        </div>
+      )}
+
+      {/* Imgs per lote when in quantity mode */}
+      {useQuantityMode && (
+        <div className="mb-4">
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-muted-foreground">
+              Matrículas por lote
+            </span>
+            <input
+              type="number"
+              value={imgsPerLote}
+              min={1}
+              onChange={(e) => setImgsPerLote(Number(e.target.value))}
+              className="bg-background/40 border border-white/10 rounded-lg px-3 py-1.5 text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+              data-ocid="batch.input"
+            />
+          </label>
+        </div>
+      )}
 
       {progress && (
         <p
@@ -238,7 +341,10 @@ export default function BatchSystem({
           </>
         ) : (
           <>
-            <Download size={16} /> Generar ZIP
+            <Download size={16} />
+            {useQuantityMode
+              ? `Generar ${cantidadMatriculas} matrículas`
+              : "Generar ZIP"}
           </>
         )}
       </button>
