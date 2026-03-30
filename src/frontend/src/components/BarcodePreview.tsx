@@ -1,4 +1,3 @@
-import JsBarcode from "jsbarcode";
 import { useEffect, useRef } from "react";
 
 export interface BarcodeConfig {
@@ -17,6 +16,12 @@ interface BarcodePreviewProps {
   code?: string;
 }
 
+declare const JsBarcode: (
+  element: HTMLElement | SVGElement | string,
+  text: string,
+  options?: Record<string, unknown>,
+) => void;
+
 export function renderBarcodeToCanvas(
   canvas: HTMLCanvasElement | OffscreenCanvas,
   code: string,
@@ -24,7 +29,7 @@ export function renderBarcodeToCanvas(
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     try {
-      // Create SVG using JsBarcode
+      // Create SVG using JsBarcode (loaded via CDN)
       const svgEl = document.createElementNS(
         "http://www.w3.org/2000/svg",
         "svg",

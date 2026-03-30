@@ -1,4 +1,3 @@
-import JSZip from "jszip";
 import { Download, Loader2 } from "lucide-react";
 import { useState } from "react";
 import { renderBarcodeToCanvas } from "./BarcodePreview";
@@ -8,6 +7,15 @@ import type { HistorialEntry } from "./PrintHistory";
 interface BatchSystemProps {
   config: BarcodeConfig;
   onHistorialAdd: (entry: HistorialEntry) => void;
+}
+
+declare class JSZip {
+  folder(name: string): JSZip | null;
+  file(name: string, data: string, options?: Record<string, unknown>): JSZip;
+  generateAsync(
+    options: Record<string, unknown>,
+    onUpdate?: (meta: { percent: number }) => void,
+  ): Promise<Blob>;
 }
 
 function parseCode(code: string): {
@@ -40,7 +48,6 @@ export default function BatchSystem({
   const [progress, setProgress] = useState("");
   const [generating, setGenerating] = useState(false);
 
-  // Determine effective starting code: use user input if set, otherwise use config.codigoBase
   const effectiveStartCode =
     codigoInicioInput.trim() !== ""
       ? codigoInicioInput.trim()
@@ -93,6 +100,7 @@ export default function BatchSystem({
       onHistorialAdd({
         id: Date.now().toString(),
         fecha: new Date().toLocaleString(),
+        hora: new Date().toTimeString().slice(0, 5),
         codigoInicio,
         codigoFin,
         lotes: loteHasta - loteDesde + 1,
@@ -201,6 +209,7 @@ export default function BatchSystem({
           />
         </label>
       </div>
+
       {progress && (
         <p
           className="text-xs text-muted-foreground mb-3 py-2 px-3 rounded-lg bg-background/30"
@@ -209,6 +218,7 @@ export default function BatchSystem({
           {progress}
         </p>
       )}
+
       <button
         type="button"
         onClick={handleGenerate}

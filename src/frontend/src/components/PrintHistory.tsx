@@ -4,6 +4,7 @@ export interface HistorialEntry {
   id: string;
   fecha: string;
   hora?: string;
+  operario?: string;
   codigoInicio: string;
   codigoFin: string;
   lotes: number;
@@ -24,6 +25,7 @@ function downloadAsPdf(historial: HistorialEntry[]) {
       <tr>
         <td>${e.fecha}</td>
         <td>${e.hora ?? "—"}</td>
+        <td>${e.operario ?? "—"}</td>
         <td>${e.codigoInicio}</td>
         <td>${e.codigoFin}</td>
         <td>${e.lotes}</td>
@@ -60,6 +62,7 @@ function downloadAsPdf(historial: HistorialEntry[]) {
       <tr>
         <th>Fecha</th>
         <th>Hora</th>
+        <th>Operario</th>
         <th>Cód. Inicio</th>
         <th>Cód. Fin</th>
         <th>Lotes</th>
@@ -149,6 +152,9 @@ export default function PrintHistory({
                   Hora
                 </th>
                 <th className="text-left py-2 px-2 text-muted-foreground font-medium">
+                  Operario
+                </th>
+                <th className="text-left py-2 px-2 text-muted-foreground font-medium">
                   Cód. Inicio
                 </th>
                 <th className="text-left py-2 px-2 text-muted-foreground font-medium">
@@ -173,6 +179,9 @@ export default function PrintHistory({
                   <td className="py-2 px-2 text-foreground">{entry.fecha}</td>
                   <td className="py-2 px-2 text-foreground">
                     {entry.hora ?? "—"}
+                  </td>
+                  <td className="py-2 px-2 text-foreground">
+                    {entry.operario ?? "—"}
                   </td>
                   <td className="py-2 px-2 font-mono text-primary">
                     {entry.codigoInicio}

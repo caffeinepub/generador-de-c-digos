@@ -1,4 +1,4 @@
-import { PlusCircle } from "lucide-react";
+import { PlusCircle, Printer } from "lucide-react";
 import { useState } from "react";
 import type { HistorialEntry } from "./PrintHistory";
 import PrintHistory from "./PrintHistory";
@@ -27,6 +27,7 @@ export default function ManualPrintPage({
 }: ManualPrintPageProps) {
   const [fecha, setFecha] = useState(todayStr());
   const [hora, setHora] = useState(nowTimeStr());
+  const [operario, setOperario] = useState("");
   const [codigoInicio, setCodigoInicio] = useState("");
   const [codigoFin, setCodigoFin] = useState("");
   const [lotes, setLotes] = useState("");
@@ -41,6 +42,7 @@ export default function ManualPrintPage({
       id: Date.now().toString(),
       fecha,
       hora,
+      operario: operario.trim() || undefined,
       codigoInicio,
       codigoFin,
       lotes: Number(lotes),
@@ -54,6 +56,7 @@ export default function ManualPrintPage({
     setTotalImagenes("");
     setFecha(todayStr());
     setHora(nowTimeStr());
+    setOperario("");
     setSuccess(true);
     setTimeout(() => setSuccess(false), 2500);
   }
@@ -98,6 +101,18 @@ export default function ManualPrintPage({
                 onChange={(e) => setHora(e.target.value)}
                 className={inputCls}
                 required
+                data-ocid="manual_print.input"
+              />
+            </label>
+
+            <label className="flex flex-col gap-1.5 sm:col-span-2">
+              <span className="text-xs text-muted-foreground">Operario</span>
+              <input
+                type="text"
+                value={operario}
+                onChange={(e) => setOperario(e.target.value)}
+                placeholder="Nombre del operario"
+                className={inputCls}
                 data-ocid="manual_print.input"
               />
             </label>
@@ -161,7 +176,7 @@ export default function ManualPrintPage({
             </label>
           </div>
 
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-3 flex-wrap">
             <button
               type="submit"
               className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all active:scale-95"
@@ -173,6 +188,21 @@ export default function ManualPrintPage({
             >
               <PlusCircle size={15} />
               Registrar Impresión
+            </button>
+
+            <button
+              type="button"
+              onClick={() => window.print()}
+              className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-semibold transition-all active:scale-95"
+              style={{
+                background: "oklch(0.828 0.167 87 / 0.15)",
+                color: "oklch(0.828 0.167 87)",
+                border: "1px solid oklch(0.828 0.167 87 / 0.3)",
+              }}
+              data-ocid="manual_print.secondary_button"
+            >
+              <Printer size={15} />
+              Imprimir
             </button>
 
             {success && (

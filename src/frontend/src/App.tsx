@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import BarcodePreview from "./components/BarcodePreview";
 import type { BarcodeConfig } from "./components/BarcodePreview";
 import BatchSystem from "./components/BatchSystem";
+import HistorialPage from "./components/HistorialPage";
 import ManualPrintPage from "./components/ManualPrintPage";
 import Orders from "./components/Orders";
 import type { Order } from "./components/Orders";
@@ -37,7 +38,7 @@ const DEFAULT_CONFIG: BarcodeConfig = {
   fontSize: 18,
 };
 
-type ActivePage = "generador" | "registro";
+type ActivePage = "generador" | "registro" | "historial";
 
 export default function App() {
   const [activePage, setActivePage] = useState<ActivePage>("generador");
@@ -113,6 +114,7 @@ export default function App() {
   const tabs: { id: ActivePage; label: string; num: string }[] = [
     { id: "generador", label: "Generador", num: "1" },
     { id: "registro", label: "Registro de Impresiones", num: "2" },
+    { id: "historial", label: "Historial", num: "3" },
   ];
 
   return (
@@ -343,10 +345,16 @@ export default function App() {
               />
             </div>
           </div>
-        ) : (
+        ) : activePage === "registro" ? (
           <ManualPrintPage
             historial={historial}
             onManualAdd={handleHistorialAdd}
+            onDelete={handleHistorialDelete}
+            onClear={() => setHistorial([])}
+          />
+        ) : (
+          <HistorialPage
+            historial={historial}
             onDelete={handleHistorialDelete}
             onClear={() => setHistorial([])}
           />
