@@ -5,6 +5,8 @@ export interface HistorialEntry {
   fecha: string;
   hora?: string;
   operario?: string;
+  tipo?: "con-codigo" | "sin-codigo";
+  nombre?: string;
   codigoInicio: string;
   codigoFin: string;
   lotes: number;
@@ -20,18 +22,25 @@ interface PrintHistoryProps {
 
 function downloadAsPdf(historial: HistorialEntry[]) {
   const rows = historial
-    .map(
-      (e) => `
+    .map((e) => {
+      const sinCodigo = e.tipo === "sin-codigo";
+      const tipoLabel = sinCodigo
+        ? e.nombre
+          ? `Placa sin código — ${e.nombre}`
+          : "Placa sin código"
+        : "Con código";
+      return `
       <tr>
         <td>${e.fecha}</td>
         <td>${e.hora ?? "—"}</td>
         <td>${e.operario ?? "—"}</td>
-        <td>${e.codigoInicio}</td>
-        <td>${e.codigoFin}</td>
-        <td>${e.lotes}</td>
+        <td>${sinCodigo ? "<em style='color:#888'>Sin código</em>" : e.codigoInicio}</td>
+        <td>${sinCodigo ? "<em style='color:#888'>Sin código</em>" : e.codigoFin}</td>
+        <td>${sinCodigo ? "—" : e.lotes}</td>
         <td>${e.totalImagenes}</td>
-      </tr>`,
-    )
+        <td>${tipoLabel}</td>
+      </tr>`;
+    })
     .join("");
 
   const html = `<!DOCTYPE html>
@@ -66,7 +75,8 @@ function downloadAsPdf(historial: HistorialEntry[]) {
         <th>Cód. Inicio</th>
         <th>Cód. Fin</th>
         <th>Lotes</th>
-        <th>Total Imgs</th>
+        <th>Total</th>
+        <th>Tipo</th>
       </tr>
     </thead>
     <tbody>${rows}</tbody>
@@ -155,6 +165,9 @@ export default function PrintHistory({
                   Operario
                 </th>
                 <th className="text-left py-2 px-2 text-muted-foreground font-medium">
+                  Tipo / Nombre
+                </th>
+                <th className="text-left py-2 px-2 text-muted-foreground font-medium">
                   Cód. Inicio
                 </th>
                 <th className="text-left py-2 px-2 text-muted-foreground font-medium">
@@ -164,49 +177,85 @@ export default function PrintHistory({
                   Lotes
                 </th>
                 <th className="text-center py-2 px-2 text-muted-foreground font-medium">
-                  Total Imgs
+                  Total
                 </th>
                 <th className="py-2 px-2" />
               </tr>
             </thead>
             <tbody>
-              {historial.map((entry, i) => (
-                <tr
-                  key={entry.id}
-                  className="border-b border-white/5 hover:bg-white/5 transition-colors"
-                  data-ocid={`history.row.item.${i + 1}`}
-                >
-                  <td className="py-2 px-2 text-foreground">{entry.fecha}</td>
-                  <td className="py-2 px-2 text-foreground">
-                    {entry.hora ?? "—"}
-                  </td>
-                  <td className="py-2 px-2 text-foreground">
-                    {entry.operario ?? "—"}
-                  </td>
-                  <td className="py-2 px-2 font-mono text-primary">
-                    {entry.codigoInicio}
-                  </td>
-                  <td className="py-2 px-2 font-mono text-primary">
-                    {entry.codigoFin}
-                  </td>
-                  <td className="py-2 px-2 text-center text-foreground">
-                    {entry.lotes}
-                  </td>
-                  <td className="py-2 px-2 text-center text-foreground">
-                    {entry.totalImagenes}
-                  </td>
-                  <td className="py-2 px-2">
-                    <button
-                      type="button"
-                      onClick={() => onDelete(entry.id)}
-                      className="p-1 rounded hover:text-destructive transition-colors text-muted-foreground"
-                      data-ocid={`history.delete_button.${i + 1}`}
-                    >
-                      <Trash2 size={13} />
-                    </button>
-                  </td>
-                </tr>
-              ))}
+              {historial.map((entry, i) => {
+                const sinCodigo = entry.tipo === "sin-codigo";
+                return (
+                  <tr
+                    key={entry.id}
+                    className="border-b border-white/5 hover:bg-white/5 transition-colors"
+                    data-ocid={`history.row.item.${i + 1}`}
+                  >
+                    <td className="py-2 px-2 text-foreground">{entry.fecha}</td>
+                    <td className="py-2 px-2 text-foreground">
+                      {entry.hora ?? "—"}
+                    </td>
+                    <td className="py-2 px-2 text-foreground">
+                      {entry.operario ?? "—"}
+                    </td>
+                    <td className="py-2 px-2">
+                      <div className="flex flex-col gap-0.5">
+                        <span
+                          className="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-medium w-fit"
+                          style={{
+                            background: sinCodigo
+                              ? "oklch(0.577 0.245 27.325 / 0.15)"
+                              : "oklch(0.696 0.17 162.48 / 0.15)",
+                            color: sinCodigo
+                              ? "oklch(0.8 0.15 27)"
+                              : "oklch(0.696 0.17 162.48)",
+                          }}
+                        >
+                          {sinCodigo ? "Sin código" : "Con código"}
+                        </span>
+                        {sinCodigo && entry.nombre && (
+                          <span
+                            className="text-[10px] font-medium"
+                            style={{ color: "oklch(0.75 0.05 240)" }}
+                          >
+                            {entry.nombre}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td className="py-2 px-2 font-mono text-primary">
+                      {sinCodigo ? (
+                        <span className="text-muted-foreground">—</span>
+                      ) : (
+                        entry.codigoInicio
+                      )}
+                    </td>
+                    <td className="py-2 px-2 font-mono text-primary">
+                      {sinCodigo ? (
+                        <span className="text-muted-foreground">—</span>
+                      ) : (
+                        entry.codigoFin
+                      )}
+                    </td>
+                    <td className="py-2 px-2 text-center text-foreground">
+                      {sinCodigo ? "—" : entry.lotes}
+                    </td>
+                    <td className="py-2 px-2 text-center text-foreground">
+                      {entry.totalImagenes}
+                    </td>
+                    <td className="py-2 px-2">
+                      <button
+                        type="button"
+                        onClick={() => onDelete(entry.id)}
+                        className="p-1 rounded hover:text-destructive transition-colors text-muted-foreground"
+                        data-ocid={`history.delete_button.${i + 1}`}
+                      >
+                        <Trash2 size={13} />
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         </div>
