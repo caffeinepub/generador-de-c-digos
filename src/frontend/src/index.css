@@ -8,19 +8,19 @@
   :root {
     --radius: 0.875rem;
     --background: 0.138 0.032 243;
-    --foreground: 0.942 0.012 236;
+    --foreground: 0.96 0.008 236;
     --card: 0.215 0.042 240;
-    --card-foreground: 0.942 0.012 236;
+    --card-foreground: 0.96 0.008 236;
     --popover: 0.245 0.048 240;
-    --popover-foreground: 0.942 0.012 236;
+    --popover-foreground: 0.96 0.008 236;
     --primary: 0.828 0.167 87;
     --primary-foreground: 0.138 0.032 243;
     --secondary: 0.268 0.042 240;
     --secondary-foreground: 0.828 0.167 87;
     --muted: 0.245 0.038 240;
-    --muted-foreground: 0.652 0.048 236;
+    --muted-foreground: 0.72 0.038 236;
     --accent: 0.295 0.052 240;
-    --accent-foreground: 0.942 0.012 236;
+    --accent-foreground: 0.96 0.008 236;
     --destructive: 0.577 0.245 27.325;
     --destructive-foreground: 0.985 0 0;
     --border: 0.942 0 0 / 8%;
@@ -32,11 +32,11 @@
     --chart-4: 0.627 0.265 303.9;
     --chart-5: 0.645 0.246 16.439;
     --sidebar: 0.175 0.038 242;
-    --sidebar-foreground: 0.942 0.012 236;
+    --sidebar-foreground: 0.96 0.008 236;
     --sidebar-primary: 0.828 0.167 87;
     --sidebar-primary-foreground: 0.138 0.032 243;
     --sidebar-accent: 0.215 0.042 240;
-    --sidebar-accent-foreground: 0.942 0.012 236;
+    --sidebar-accent-foreground: 0.96 0.008 236;
     --sidebar-border: 0.942 0 0 / 8%;
     --sidebar-ring: 0.828 0.167 87;
   }
@@ -49,6 +49,22 @@
     @apply bg-background text-foreground;
     font-family: "Inter", sans-serif;
     font-size: 13px;
+  }
+
+  /* Color negro fuerte cuando el usuario escribe en inputs */
+  input:not(:placeholder-shown),
+  input:focus,
+  textarea:not(:placeholder-shown),
+  textarea:focus,
+  select:focus {
+    color: #000000 !important;
+    background-color: #ffffff !important;
+  }
+
+  input[type="number"]:not([value=""]):focus,
+  input[type="number"]:focus {
+    color: #000000 !important;
+    background-color: #ffffff !important;
   }
 }
 

@@ -1,5 +1,6 @@
 import { PlusCircle, Printer } from "lucide-react";
 import { useState } from "react";
+import type { Order } from "./Orders";
 import type { HistorialEntry } from "./PrintHistory";
 import PrintHistory from "./PrintHistory";
 
@@ -8,6 +9,8 @@ interface ManualPrintPageProps {
   onManualAdd: (entry: HistorialEntry) => void;
   onDelete: (id: string) => void;
   onClear: () => void;
+  orders: Order[];
+  onAddToPedido: (orderId: string, cantidad: number) => void;
 }
 
 function todayStr() {
@@ -26,6 +29,8 @@ export default function ManualPrintPage({
   onManualAdd,
   onDelete,
   onClear,
+  orders,
+  onAddToPedido,
 }: ManualPrintPageProps) {
   const [tipo, setTipo] = useState<TipoMatricula>("con-codigo");
   const [fecha, setFecha] = useState(todayStr());
@@ -38,14 +43,21 @@ export default function ManualPrintPage({
   const [cantidad, setCantidad] = useState("");
   const [nombre, setNombre] = useState("");
   const [success, setSuccess] = useState(false);
+  // Prompt to add placa CE to a pedido
+  const [placaPrompt, setPlacaPrompt] = useState<{
+    cantidad: number;
+    selectedOrderId: string;
+  } | null>(null);
 
   function handleSubmit(e: React.FormEvent) {
     e.preventDefault();
 
     let entry: HistorialEntry;
+    let cantidadNum = 0;
 
     if (tipo === "sin-codigo") {
       if (!cantidad) return;
+      cantidadNum = Number(cantidad);
       entry = {
         id: Date.now().toString(),
         fecha,
@@ -56,7 +68,7 @@ export default function ManualPrintPage({
         codigoInicio: "",
         codigoFin: "",
         lotes: 0,
-        totalImagenes: Number(cantidad),
+        totalImagenes: cantidadNum,
       };
     } else {
       if (!codigoInicio || !codigoFin || !lotes || !totalImagenes) return;
@@ -85,10 +97,18 @@ export default function ManualPrintPage({
     setOperario("");
     setSuccess(true);
     setTimeout(() => setSuccess(false), 2500);
+
+    // Show prompt for placas CE
+    if (tipo === "sin-codigo" && orders.length > 0 && cantidadNum > 0) {
+      setPlacaPrompt({
+        cantidad: cantidadNum,
+        selectedOrderId: orders[0].id,
+      });
+    }
   }
 
   const inputCls =
-    "bg-background/40 border border-white/10 rounded-lg px-3 py-2 text-foreground text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary w-full placeholder:text-muted-foreground/50 transition-colors";
+    "bg-background/40 border border-white/15 rounded-lg px-3 py-2 text-foreground text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary w-full placeholder:text-muted-foreground/55 transition-colors";
 
   return (
     <div className="max-w-3xl mx-auto space-y-6">
@@ -123,11 +143,11 @@ export default function ManualPrintPage({
                 color:
                   tipo === "con-codigo"
                     ? "oklch(0.138 0.032 243)"
-                    : "oklch(0.652 0.048 236)",
+                    : "oklch(0.75 0.04 236)",
                 borderColor:
                   tipo === "con-codigo"
                     ? "oklch(0.828 0.167 87)"
-                    : "rgba(255,255,255,0.1)",
+                    : "rgba(255,255,255,0.12)",
               }}
               data-ocid="manual_print.tipo_con_codigo"
             >
@@ -145,11 +165,11 @@ export default function ManualPrintPage({
                 color:
                   tipo === "sin-codigo"
                     ? "oklch(0.138 0.032 243)"
-                    : "oklch(0.652 0.048 236)",
+                    : "oklch(0.75 0.04 236)",
                 borderColor:
                   tipo === "sin-codigo"
                     ? "oklch(0.696 0.17 162.48)"
-                    : "rgba(255,255,255,0.1)",
+                    : "rgba(255,255,255,0.12)",
               }}
               data-ocid="manual_print.tipo_sin_codigo"
             >
@@ -272,7 +292,7 @@ export default function ManualPrintPage({
                     className={inputCls}
                     data-ocid="manual_print.nombre_input"
                   />
-                  <span className="text-[11px] text-muted-foreground/60">
+                  <span className="text-[11px] text-muted-foreground/70">
                     Opcional. Identifica el proveedor o tipo de placa.
                   </span>
                 </label>
@@ -291,7 +311,7 @@ export default function ManualPrintPage({
                     required
                     data-ocid="manual_print.input"
                   />
-                  <span className="text-[11px] text-muted-foreground/60">
+                  <span className="text-[11px] text-muted-foreground/70">
                     Estas placas no tienen código de barras. En el PDF solo
                     aparecerá la cantidad.
                   </span>
@@ -343,6 +363,66 @@ export default function ManualPrintPage({
             )}
           </div>
         </form>
+
+        {/* Placa CE: add to pedido prompt */}
+        {placaPrompt && orders.length > 0 && (
+          <div
+            className="mt-5 rounded-xl p-4"
+            style={{
+              background: "oklch(0.696 0.17 162.48 / 0.08)",
+              border: "1px solid oklch(0.696 0.17 162.48 / 0.3)",
+            }}
+          >
+            <p
+              className="text-xs font-semibold mb-3"
+              style={{ color: "oklch(0.75 0.12 162)" }}
+            >
+              📋 ¿Quieres añadir {placaPrompt.cantidad} placas a un pedido
+              activo?
+            </p>
+            <div className="flex gap-2">
+              <select
+                value={placaPrompt.selectedOrderId}
+                onChange={(e) =>
+                  setPlacaPrompt((p) =>
+                    p ? { ...p, selectedOrderId: e.target.value } : null,
+                  )
+                }
+                className="flex-1 bg-background/60 border border-white/15 rounded-lg px-3 py-1.5 text-foreground text-xs focus:outline-none focus:ring-1 focus:ring-primary"
+              >
+                {orders.map((o) => (
+                  <option key={o.id} value={o.id}>
+                    {o.nombre} ({o.hecho}/{o.total})
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => {
+                  onAddToPedido(
+                    placaPrompt.selectedOrderId,
+                    placaPrompt.cantidad,
+                  );
+                  setPlacaPrompt(null);
+                }}
+                className="px-4 py-1.5 rounded-lg text-xs font-semibold transition-all active:scale-95"
+                style={{
+                  background: "oklch(0.696 0.17 162.48)",
+                  color: "oklch(0.138 0.032 243)",
+                }}
+              >
+                Sí, añadir
+              </button>
+              <button
+                type="button"
+                onClick={() => setPlacaPrompt(null)}
+                className="px-3 py-1.5 rounded-lg text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                No
+              </button>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* History table with PDF button */}

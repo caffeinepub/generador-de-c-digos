@@ -2,12 +2,14 @@ import { useCallback, useEffect, useState } from "react";
 import BarcodePreview from "./components/BarcodePreview";
 import type { BarcodeConfig } from "./components/BarcodePreview";
 import BatchSystem from "./components/BatchSystem";
+import ChatPage from "./components/ChatPage";
 import HistorialPage from "./components/HistorialPage";
 import ManualPrintPage from "./components/ManualPrintPage";
 import Orders from "./components/Orders";
 import type { Order } from "./components/Orders";
 import PrintHistory from "./components/PrintHistory";
 import type { HistorialEntry } from "./components/PrintHistory";
+import TutorialPage from "./components/TutorialPage";
 import WeeklyGoal from "./components/WeeklyGoal";
 import { useLocalStorage } from "./hooks/useLocalStorage";
 
@@ -24,7 +26,7 @@ function getSemanaISO(d: Date): string {
           ((week1.getDay() + 6) % 7)) /
           7,
       ),
-  ).padStart(2, "0")}`;
+  ).padStart(2, "00")}`;
 }
 
 const DEFAULT_CONFIG: BarcodeConfig = {
@@ -38,7 +40,7 @@ const DEFAULT_CONFIG: BarcodeConfig = {
   fontSize: 18,
 };
 
-type ActivePage = "generador" | "registro" | "historial";
+type ActivePage = "generador" | "registro" | "historial" | "tutorial" | "chat";
 
 export default function App() {
   const [activePage, setActivePage] = useState<ActivePage>("generador");
@@ -51,8 +53,14 @@ export default function App() {
     [],
   );
   const [orders, setOrders] = useLocalStorage<Order[]>("pedidos", [
-    { id: "1", nombre: "Pedido Alpha", total: 300, hecho: 60 },
-    { id: "2", nombre: "Pedido Beta", total: 500, hecho: 150 },
+    {
+      id: "1",
+      nombre: "Pedido Alpha",
+      total: 300,
+      hecho: 60,
+      tipo: "matriculas",
+    },
+    { id: "2", nombre: "Pedido Beta", total: 500, hecho: 150, tipo: "placas" },
   ]);
   const [semanaData, setSemanaData] = useLocalStorage<{
     week: string;
@@ -77,26 +85,59 @@ export default function App() {
   const handleAddCama = useCallback(
     (orderId: string) => {
       setOrders((prev) =>
-        prev.map((o) =>
-          o.id === orderId
-            ? { ...o, hecho: Math.min(o.total, o.hecho + piezasPorCama) }
-            : o,
-        ),
+        prev.map((o) => {
+          if (o.id !== orderId) return o;
+          const qty = o.piezasPorCama ?? piezasPorCama;
+          return { ...o, hecho: Math.min(o.total, o.hecho + qty) };
+        }),
       );
-      setSemanaData((prev) => ({ ...prev, hecho: prev.hecho + piezasPorCama }));
+      const order = orders.find((o) => o.id === orderId);
+      const qty = order?.piezasPorCama ?? piezasPorCama;
+      setSemanaData((prev) => ({ ...prev, hecho: prev.hecho + qty }));
     },
-    [piezasPorCama, setOrders, setSemanaData],
+    [piezasPorCama, orders, setOrders, setSemanaData],
   );
 
-  function handleAddOrder(nombre: string, total: number) {
+  function handleAddOrder(
+    nombre: string,
+    total: number,
+    tipo: Order["tipo"],
+    codigoInicio?: string,
+    codigoFin?: string,
+  ) {
     setOrders((prev) => [
       ...prev,
-      { id: Date.now().toString(), nombre, total, hecho: 0 },
+      {
+        id: Date.now().toString(),
+        nombre,
+        total,
+        hecho: 0,
+        tipo,
+        codigoInicio,
+        codigoFin,
+      },
     ]);
   }
 
   function handleDeleteOrder(id: string) {
     setOrders((prev) => prev.filter((o) => o.id !== id));
+  }
+
+  function handleUpdateOrder(id: string, changes: Partial<Order>) {
+    setOrders((prev) =>
+      prev.map((o) => (o.id === id ? { ...o, ...changes } : o)),
+    );
+  }
+
+  function handleAddToPedido(orderId: string, cantidad: number) {
+    setOrders((prev) =>
+      prev.map((o) =>
+        o.id === orderId
+          ? { ...o, hecho: Math.min(o.total, o.hecho + cantidad) }
+          : o,
+      ),
+    );
+    setSemanaData((prev) => ({ ...prev, hecho: prev.hecho + cantidad }));
   }
 
   function handleHistorialAdd(entry: HistorialEntry) {
@@ -113,8 +154,10 @@ export default function App() {
 
   const tabs: { id: ActivePage; label: string; num: string }[] = [
     { id: "generador", label: "Generador", num: "1" },
-    { id: "registro", label: "Registro de Impresiones", num: "2" },
+    { id: "registro", label: "Registro", num: "2" },
     { id: "historial", label: "Historial", num: "3" },
+    { id: "tutorial", label: "Guía", num: "?" },
+    { id: "chat", label: "Chat", num: "💬" },
   ];
 
   return (
@@ -132,15 +175,12 @@ export default function App() {
       >
         <div className="flex items-center justify-between max-w-[1400px] mx-auto">
           <div className="flex items-center gap-3">
-            <div
-              className="w-8 h-8 rounded-lg flex items-center justify-center text-sm font-bold shrink-0"
-              style={{
-                background: "oklch(0.828 0.167 87)",
-                color: "oklch(0.138 0.032 243)",
-              }}
-            >
-              B
-            </div>
+            <img
+              src="/assets/generated/logo-generador-codigos-transparent.dim_200x200.png"
+              alt="Logo Generador de Códigos"
+              className="w-10 h-10 rounded-lg shrink-0 object-contain"
+              style={{ background: "transparent" }}
+            />
             <div>
               <h1 className="font-semibold text-sm text-foreground">
                 Barcode Manager
@@ -151,10 +191,21 @@ export default function App() {
             </div>
           </div>
 
-          {/* Page tabs */}
           <nav className="flex items-center gap-1" aria-label="Páginas">
             {tabs.map((tab) => {
               const isActive = activePage === tab.id;
+              const isTutorial = tab.id === "tutorial";
+              const isChat = tab.id === "chat";
+              const accentColor = isChat
+                ? "oklch(0.696 0.17 162.48)"
+                : isTutorial
+                  ? "oklch(0.8 0.12 270)"
+                  : "oklch(0.828 0.167 87)";
+              const accentBg = isChat
+                ? "oklch(0.696 0.17 162.48 / 0.12)"
+                : isTutorial
+                  ? "oklch(0.7 0.15 270 / 0.12)"
+                  : "oklch(0.828 0.167 87 / 0.12)";
               return (
                 <button
                   key={tab.id}
@@ -162,14 +213,10 @@ export default function App() {
                   onClick={() => setActivePage(tab.id)}
                   className="flex items-center gap-1.5 px-4 py-1.5 rounded-lg text-xs font-medium transition-all"
                   style={{
-                    background: isActive
-                      ? "oklch(0.828 0.167 87 / 0.12)"
-                      : "transparent",
-                    color: isActive
-                      ? "oklch(0.828 0.167 87)"
-                      : "oklch(0.652 0.048 236)",
+                    background: isActive ? accentBg : "transparent",
+                    color: isActive ? accentColor : "oklch(0.72 0.038 236)",
                     borderBottom: isActive
-                      ? "2px solid oklch(0.828 0.167 87)"
+                      ? `2px solid ${accentColor}`
                       : "2px solid transparent",
                   }}
                   data-ocid={`nav.${tab.id}.link`}
@@ -178,11 +225,11 @@ export default function App() {
                     className="w-4 h-4 rounded-full flex items-center justify-center text-[10px] font-bold shrink-0"
                     style={{
                       background: isActive
-                        ? "oklch(0.828 0.167 87)"
+                        ? accentColor
                         : "oklch(0.295 0.052 240)",
                       color: isActive
                         ? "oklch(0.138 0.032 243)"
-                        : "oklch(0.652 0.048 236)",
+                        : "oklch(0.85 0.02 236)",
                     }}
                   >
                     {tab.num}
@@ -230,7 +277,7 @@ export default function App() {
                       onChange={(e) =>
                         updateConfig("codigoBase", e.target.value)
                       }
-                      className="bg-background/40 border border-white/10 rounded-lg px-3 py-1.5 text-foreground text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary"
+                      className="bg-background/40 border border-white/15 rounded-lg px-3 py-1.5 text-foreground text-sm font-mono focus:outline-none focus:ring-1 focus:ring-primary"
                       data-ocid="config.input"
                     />
                   </label>
@@ -255,7 +302,7 @@ export default function App() {
                           onChange={(e) =>
                             updateConfig(field, Number(e.target.value))
                           }
-                          className="bg-background/40 border border-white/10 rounded-lg px-2 py-1.5 text-foreground text-xs focus:outline-none focus:ring-1 focus:ring-primary"
+                          className="bg-background/40 border border-white/15 rounded-lg px-2 py-1.5 text-foreground text-xs focus:outline-none focus:ring-1 focus:ring-primary"
                           data-ocid="config.input"
                         />
                       </label>
@@ -271,7 +318,7 @@ export default function App() {
                       onChange={(e) =>
                         updateConfig("fontSize", Number(e.target.value))
                       }
-                      className="bg-background/40 border border-white/10 rounded-lg px-3 py-1.5 text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                      className="bg-background/40 border border-white/15 rounded-lg px-3 py-1.5 text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
                       data-ocid="config.input"
                     />
                   </label>
@@ -287,18 +334,18 @@ export default function App() {
                 }}
               >
                 <h2 className="text-xs font-semibold uppercase tracking-widest text-muted-foreground mb-3">
-                  Configuración de Producción
+                  Producción
                 </h2>
                 <label className="flex flex-col gap-1">
                   <span className="text-xs text-muted-foreground">
-                    Piezas por cama
+                    Piezas por cama (global)
                   </span>
                   <input
                     type="number"
                     value={piezasPorCama}
                     min={1}
                     onChange={(e) => setPiezasPorCama(Number(e.target.value))}
-                    className="bg-background/40 border border-white/10 rounded-lg px-3 py-1.5 text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
+                    className="bg-background/40 border border-white/15 rounded-lg px-3 py-1.5 text-foreground text-sm focus:outline-none focus:ring-1 focus:ring-primary"
                     data-ocid="config.input"
                   />
                 </label>
@@ -312,6 +359,8 @@ export default function App() {
               <BatchSystem
                 config={config}
                 onHistorialAdd={handleHistorialAdd}
+                orders={orders}
+                onAddToPedido={handleAddToPedido}
               />
             </aside>
 
@@ -342,6 +391,8 @@ export default function App() {
                 onAddCama={handleAddCama}
                 onDelete={handleDeleteOrder}
                 onAdd={handleAddOrder}
+                onUpdateOrder={handleUpdateOrder}
+                onHistorialAdd={handleHistorialAdd}
               />
             </div>
           </div>
@@ -351,13 +402,19 @@ export default function App() {
             onManualAdd={handleHistorialAdd}
             onDelete={handleHistorialDelete}
             onClear={() => setHistorial([])}
+            orders={orders}
+            onAddToPedido={handleAddToPedido}
           />
-        ) : (
+        ) : activePage === "historial" ? (
           <HistorialPage
             historial={historial}
             onDelete={handleHistorialDelete}
             onClear={() => setHistorial([])}
           />
+        ) : activePage === "chat" ? (
+          <ChatPage historial={historial} pedidos={orders} />
+        ) : (
+          <TutorialPage />
         )}
       </main>
 
