@@ -1,25 +1,34 @@
 import { FileDown, Send, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import type { Order } from "./Orders";
+import type { PedidoEnviado } from "./PedidosEnviadosPage";
 import type { HistorialEntry } from "./PrintHistory";
 
 interface ChatPageProps {
   historial: HistorialEntry[];
   pedidos: Order[];
+  onAddPedidoEnviado?: (p: PedidoEnviado) => void;
 }
 
 interface PdfAction {
   type: "pdf";
   label: string;
   handler: "barcode_entry" | "sincodigo_entry" | "resumen";
-  entryIndex?: number; // 0-based
+  entryIndex?: number;
 }
+
+interface AddEnviadoAction {
+  type: "add_enviado";
+  prefill?: Partial<PedidoEnviado>;
+}
+
+type MessageAction = PdfAction | AddEnviadoAction;
 
 interface ChatMessage {
   id: string;
   role: "user" | "bot";
   text: string;
-  action?: PdfAction;
+  action?: MessageAction;
 }
 
 // ---- PDF helpers (same approach as HistorialPage) --------------------------------
@@ -137,17 +146,73 @@ function getFromLS<T>(key: string, fallback: T): T {
   }
 }
 
+// Parse "añadir pedido enviado" style commands and extract name/qty/type
+function parseAddEnviado(msg: string): {
+  detected: boolean;
+  nombre?: string;
+  cantidad?: number;
+  tipo?: PedidoEnviado["tipo"];
+} {
+  const normalized = msg
+    .toLowerCase()
+    .normalize("NFD")
+    .replace(/\p{Diacritic}/gu, "");
+
+  const isEnviado =
+    normalized.includes("enviado") ||
+    normalized.includes("envio") ||
+    (normalized.includes("pedido") &&
+      (normalized.includes("enviad") ||
+        normalized.includes("completa") ||
+        normalized.includes("termina") ||
+        normalized.includes("enviar") ||
+        normalized.includes("marca"))) ||
+    (normalized.includes("anadi") && normalized.includes("enviado")) ||
+    (normalized.includes("añad") && normalized.includes("enviado")) ||
+    (normalized.includes("registra") && normalized.includes("enviado")) ||
+    normalized.includes("nuevo enviado");
+
+  if (!isEnviado) return { detected: false };
+
+  // Try to extract quantity
+  const qtyMatch = normalized.match(
+    /(\d+)\s*(unidades?|piezas?|uds?|matriculas?|placas?)?/,
+  );
+  const cantidad = qtyMatch ? Number.parseInt(qtyMatch[1], 10) : undefined;
+
+  // Try to extract type
+  let tipo: PedidoEnviado["tipo"] | undefined;
+  if (normalized.includes("matricula") || normalized.includes("matriculas")) {
+    tipo = "matriculas";
+  } else if (normalized.includes("placa") || normalized.includes("placas")) {
+    tipo = "placas";
+  } else if (normalized.includes("advertencia")) {
+    tipo = "advertencia";
+  }
+
+  // Try to extract name - look for quoted text or "llamado X" / "de X"
+  let nombre: string | undefined;
+  const quotedMatch = msg.match(/"([^"]+)"|«([^»]+)»|'([^']+)'/);
+  if (quotedMatch) {
+    nombre = quotedMatch[1] || quotedMatch[2] || quotedMatch[3];
+  } else {
+    const llamadoMatch = msg.match(/llamado\s+(.+?)(?:\s+de|\s+con|\s*$)/i);
+    if (llamadoMatch) nombre = llamadoMatch[1].trim();
+  }
+
+  return { detected: true, nombre, cantidad, tipo };
+}
+
 function buildBotResponse(
   userText: string,
   historial: HistorialEntry[],
   pedidos: Order[],
-): { text: string; action?: PdfAction } {
+): { text: string; action?: MessageAction } {
   const msg = userText
     .toLowerCase()
     .normalize("NFD")
     .replace(/\p{Diacritic}/gu, "");
 
-  // Read fresh from localStorage (in case external updates)
   const semana = getFromLS<{ week: string; hecho: number }>("semana", {
     week: "",
     hecho: 0,
@@ -156,6 +221,42 @@ function buildBotResponse(
   const lastCode = getFromLS<string>("lastGeneratedCode", "");
 
   const today = new Date().toLocaleDateString("es-ES");
+
+  // ---- Pedido Enviado ----
+  const enviado = parseAddEnviado(userText);
+  if (enviado.detected) {
+    const missing: string[] = [];
+    if (!enviado.nombre) missing.push("nombre del pedido");
+    if (!enviado.cantidad || enviado.cantidad <= 0) missing.push("cantidad");
+    if (!enviado.tipo)
+      missing.push("tipo (Matrículas / Placas CE / Advertencia)");
+
+    if (missing.length > 0) {
+      return {
+        text: `Para añadir un pedido enviado necesito saber: **${missing.join(", ")}**.\n\nPor ejemplo: "Añadir pedido enviado: Pedido Cliente ABC, 300 matrículas".\n\nO puedes usar el botón de abajo para rellenar el formulario directamente.`,
+        action: {
+          type: "add_enviado",
+          prefill: {
+            nombre: enviado.nombre,
+            cantidad: enviado.cantidad,
+            tipo: enviado.tipo,
+          },
+        },
+      };
+    }
+
+    return {
+      text: `¿Confirmas que quieres añadir este pedido enviado?\n\n• **Nombre:** ${enviado.nombre}\n• **Cantidad:** ${enviado.cantidad?.toLocaleString("es")} unidades\n• **Tipo:** ${enviado.tipo === "matriculas" ? "Matrículas" : enviado.tipo === "placas" ? "Placas CE" : "Advertencia"}\n\nPulsa el botón para confirmarlo.`,
+      action: {
+        type: "add_enviado",
+        prefill: {
+          nombre: enviado.nombre,
+          cantidad: enviado.cantidad,
+          tipo: enviado.tipo,
+        },
+      },
+    };
+  }
 
   // ---- PDF requests ----
   const pdfMatch = msg.match(
@@ -185,7 +286,7 @@ function buildBotResponse(
 
   if (pdfMatch) {
     const numStr = pdfMatch[1] || pdfMatch[2];
-    const idx = Number.parseInt(numStr, 10) - 1; // 0-based
+    const idx = Number.parseInt(numStr, 10) - 1;
     if (idx < 0 || idx >= historial.length) {
       return {
         text: `No encuentro el registro #${numStr}. Tienes ${historial.length} registro${historial.length !== 1 ? "s" : ""} en total. Prueba con un número del 1 al ${historial.length}.`,
@@ -367,20 +468,19 @@ function buildBotResponse(
     msg.includes("para que")
   ) {
     return {
-      text: `Soy tu asistente de producción. Puedo ayudarte con:\n\n• 🏷️ **Códigos**: "¿por qué placa me quedé?", "último código"\n• 📦 **Pedidos**: "¿qué pedidos tengo activos?"\n• 📋 **Historial**: "¿cuántos registros hay?", "muéstrame el historial"\n• 📅 **Hoy**: "¿cuánto hice hoy?"\n• 📈 **Semana**: "¿cuánto llevo esta semana?", "objetivo semanal"\n• 📄 **PDFs**: "PDF del registro 1", "dame un resumen en PDF"\n\n¿En qué puedo ayudarte?`,
+      text: `Soy tu asistente de producción. Puedo ayudarte con:\n\n• 🏷️ **Códigos**: "¿por qué placa me quedé?", "último código"\n• 📦 **Pedidos**: "¿qué pedidos tengo activos?"\n• 📋 **Historial**: "¿cuántos registros hay?", "muéstrame el historial"\n• 📅 **Hoy**: "¿cuánto hice hoy?"\n• 📈 **Semana**: "¿cuánto llevo esta semana?", "objetivo semanal"\n• 📄 **PDFs**: "PDF del registro 1", "dame un resumen en PDF"\n• 📤 **Pedidos enviados**: "añadir pedido enviado: Cliente ABC, 300 matrículas"\n\n¿En qué puedo ayudarte?`,
     };
   }
 
   // ---- Fallback ----
   return {
-    text: `No he entendido bien tu pregunta 🤔. Puedo responder sobre:\n• Último código generado\n• Pedidos activos y su progreso\n• Historial de registros\n• Producción de hoy o esta semana\n• Generar PDFs\n\nPrueba con alguna de las preguntas rápidas de abajo, o dime "ayuda" para ver todo lo que puedo hacer.`,
+    text: `No he entendido bien tu pregunta 🤔. Puedo responder sobre:\n• Último código generado\n• Pedidos activos y su progreso\n• Historial de registros\n• Producción de hoy o esta semana\n• Generar PDFs\n• Añadir pedidos enviados\n\nPrueba con alguna de las preguntas rápidas de abajo, o dime "ayuda" para ver todo lo que puedo hacer.`,
   };
 }
 
 // ---- Render helpers ----------------------------------------------------------
 
 function renderText(text: string): React.ReactNode {
-  // Split on \n and handle **bold**
   return text.split("\n").map((line) => {
     const lineKey = line.slice(0, 40) + line.length;
     const parts = line.split(/(\*\*[^*]+\*\*)/g);
@@ -410,14 +510,152 @@ const QUICK_QUESTIONS = [
   "¿Cuánto hice hoy?",
   "¿Cuánto llevo esta semana?",
   "Dame un resumen en PDF",
+  "Añadir pedido enviado",
 ];
 
 const WELCOME_MSG =
-  "¡Hola! Soy tu asistente de producción 🤖. Puedes preguntarme cosas como: ¿por qué placa me quedé?, ¿qué pedidos tengo activos?, ¿cuánto hice hoy? También puedo generar PDFs si me lo pides.";
+  "¡Hola! Soy tu asistente de producción 🤖. Puedes preguntarme cosas como: ¿por qué placa me quedé?, ¿qué pedidos tengo activos?, ¿cuánto hice hoy? También puedo generar PDFs y añadir pedidos enviados si me lo pides.";
+
+// ---- Add Enviado inline form -------------------------------------------------
+
+interface AddEnviadoFormProps {
+  prefill?: Partial<PedidoEnviado>;
+  onConfirm: (p: PedidoEnviado) => void;
+}
+
+function AddEnviadoForm({ prefill, onConfirm }: AddEnviadoFormProps) {
+  const [nombre, setNombre] = useState(prefill?.nombre ?? "");
+  const [cantidad, setCantidad] = useState<number>(prefill?.cantidad ?? 0);
+  const [tipo, setTipo] = useState<PedidoEnviado["tipo"]>(
+    prefill?.tipo ?? "matriculas",
+  );
+  const [notas, setNotas] = useState("");
+  const [submitted, setSubmitted] = useState(false);
+
+  if (submitted) {
+    return (
+      <div
+        className="rounded-xl px-4 py-3 text-xs"
+        style={{
+          background: "oklch(0.696 0.17 162.48 / 0.12)",
+          border: "1px solid oklch(0.696 0.17 162.48 / 0.3)",
+          color: "oklch(0.696 0.17 162.48)",
+        }}
+      >
+        ✅ ¡Pedido enviado registrado correctamente!
+      </div>
+    );
+  }
+
+  function handleSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!nombre.trim() || cantidad <= 0) return;
+    const now = new Date();
+    onConfirm({
+      id: Date.now().toString(),
+      fecha: now.toLocaleDateString("es-ES"),
+      hora: now.toLocaleTimeString("es-ES", {
+        hour: "2-digit",
+        minute: "2-digit",
+      }),
+      nombre: nombre.trim(),
+      cantidad,
+      tipo,
+      notas: notas.trim() || undefined,
+    });
+    setSubmitted(true);
+  }
+
+  return (
+    <form
+      onSubmit={handleSubmit}
+      className="rounded-xl p-4 space-y-3"
+      style={{
+        background: "oklch(0.175 0.038 242)",
+        border: "1px solid rgba(255,255,255,0.1)",
+      }}
+    >
+      <p
+        className="text-[10px] font-semibold uppercase tracking-widest"
+        style={{ color: "oklch(0.696 0.17 162.48)" }}
+      >
+        Nuevo pedido enviado
+      </p>
+      <div className="grid grid-cols-2 gap-2">
+        <label className="flex flex-col gap-1 col-span-2">
+          <span className="text-[10px] text-muted-foreground">Nombre *</span>
+          <input
+            type="text"
+            value={nombre}
+            onChange={(e) => setNombre(e.target.value)}
+            required
+            placeholder="Ej: Pedido Cliente ABC"
+            className="rounded-lg px-3 py-1.5 text-xs border focus:outline-none"
+            style={{ color: "#000", background: "#fff", borderColor: "#ccc" }}
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-[10px] text-muted-foreground">Cantidad *</span>
+          <input
+            type="number"
+            value={cantidad || ""}
+            onChange={(e) => setCantidad(Number(e.target.value))}
+            required
+            min={1}
+            placeholder="0"
+            className="rounded-lg px-3 py-1.5 text-xs border focus:outline-none"
+            style={{ color: "#000", background: "#fff", borderColor: "#ccc" }}
+          />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-[10px] text-muted-foreground">Tipo *</span>
+          <select
+            value={tipo}
+            onChange={(e) => setTipo(e.target.value as PedidoEnviado["tipo"])}
+            className="rounded-lg px-3 py-1.5 text-xs border focus:outline-none"
+            style={{ color: "#000", background: "#fff", borderColor: "#ccc" }}
+          >
+            <option value="matriculas">Matrículas</option>
+            <option value="placas">Placas CE</option>
+            <option value="advertencia">Advertencia</option>
+          </select>
+        </label>
+        <label className="flex flex-col gap-1 col-span-2">
+          <span className="text-[10px] text-muted-foreground">
+            Notas (opcional)
+          </span>
+          <input
+            type="text"
+            value={notas}
+            onChange={(e) => setNotas(e.target.value)}
+            placeholder="Ej: Enviado por mensajería"
+            className="rounded-lg px-3 py-1.5 text-xs border focus:outline-none"
+            style={{ color: "#000", background: "#fff", borderColor: "#ccc" }}
+          />
+        </label>
+      </div>
+      <button
+        type="submit"
+        className="px-4 py-1.5 rounded-lg text-xs font-semibold transition-all hover:opacity-90"
+        style={{
+          background: "oklch(0.696 0.17 162.48)",
+          color: "oklch(0.138 0.032 243)",
+        }}
+        data-ocid="chat.add_enviado.submit"
+      >
+        Confirmar pedido enviado
+      </button>
+    </form>
+  );
+}
 
 // ---- Main component ---------------------------------------------------------
 
-export default function ChatPage({ historial, pedidos }: ChatPageProps) {
+export default function ChatPage({
+  historial,
+  pedidos,
+  onAddPedidoEnviado,
+}: ChatPageProps) {
   const [messages, setMessages] = useState<ChatMessage[]>(() => {
     const saved = getFromLS<ChatMessage[]>("chatHistory", []);
     if (saved.length > 0) return saved;
@@ -427,7 +665,6 @@ export default function ChatPage({ historial, pedidos }: ChatPageProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  // Persist chat history (strip action handlers — store as plain objects)
   useEffect(() => {
     try {
       localStorage.setItem("chatHistory", JSON.stringify(messages));
@@ -456,7 +693,6 @@ export default function ChatPage({ historial, pedidos }: ChatPageProps) {
     setInput("");
     addMessage({ role: "user", text: userText });
 
-    // Short delay for "typing" feel
     setTimeout(() => {
       const response = buildBotResponse(userText, historial, pedidos);
       addMessage({ role: "bot", text: response.text, action: response.action });
@@ -489,6 +725,14 @@ export default function ChatPage({ historial, pedidos }: ChatPageProps) {
     addMessage({
       role: "bot",
       text: "📄 Se ha abierto una nueva ventana con el PDF. Usa Ctrl+P o el diálogo del navegador para guardarlo o imprimirlo.",
+    });
+  }
+
+  function handleAddEnviado(p: PedidoEnviado) {
+    onAddPedidoEnviado?.(p);
+    addMessage({
+      role: "bot",
+      text: `✅ ¡Pedido enviado añadido correctamente!\n\n• **Nombre:** ${p.nombre}\n• **Cantidad:** ${p.cantidad.toLocaleString("es")} unidades\n• **Tipo:** ${p.tipo === "matriculas" ? "Matrículas" : p.tipo === "placas" ? "Placas CE" : "Advertencia"}\n\nPuedes verlo en la página "Pedidos Enviados".`,
     });
   }
 
@@ -528,7 +772,8 @@ export default function ChatPage({ historial, pedidos }: ChatPageProps) {
               Asistente de Producción
             </h2>
             <p className="text-xs text-muted-foreground">
-              Pregúntame sobre códigos, pedidos, historial o genera PDFs
+              Pregúntame sobre códigos, pedidos, historial, genera PDFs o añade
+              pedidos enviados
             </p>
           </div>
         </div>
@@ -560,7 +805,6 @@ export default function ChatPage({ historial, pedidos }: ChatPageProps) {
             key={msg.id}
             className={`flex gap-2.5 ${msg.role === "user" ? "flex-row-reverse" : "flex-row"}`}
           >
-            {/* Avatar */}
             {msg.role === "bot" && (
               <div
                 className="w-7 h-7 rounded-lg flex items-center justify-center text-sm shrink-0 mt-0.5"
@@ -583,7 +827,6 @@ export default function ChatPage({ historial, pedidos }: ChatPageProps) {
                 </span>
               )}
 
-              {/* Bubble */}
               <div
                 className="rounded-2xl px-4 py-3 text-xs leading-relaxed"
                 style={
@@ -609,7 +852,7 @@ export default function ChatPage({ historial, pedidos }: ChatPageProps) {
               {msg.action?.type === "pdf" && (
                 <button
                   type="button"
-                  onClick={() => handlePdfAction(msg.action!)}
+                  onClick={() => handlePdfAction(msg.action as PdfAction)}
                   className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all hover:opacity-90 active:scale-95"
                   style={{
                     background: "oklch(0.828 0.167 87)",
@@ -618,8 +861,16 @@ export default function ChatPage({ historial, pedidos }: ChatPageProps) {
                   data-ocid="chat.pdf_action_button"
                 >
                   <FileDown size={13} />
-                  {msg.action.label}
+                  {(msg.action as PdfAction).label}
                 </button>
+              )}
+
+              {/* Add Enviado inline form */}
+              {msg.action?.type === "add_enviado" && onAddPedidoEnviado && (
+                <AddEnviadoForm
+                  prefill={(msg.action as AddEnviadoAction).prefill}
+                  onConfirm={handleAddEnviado}
+                />
               )}
             </div>
 
@@ -677,7 +928,7 @@ export default function ChatPage({ historial, pedidos }: ChatPageProps) {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-          placeholder="Escribe tu pregunta... (ej: ¿por qué placa me quedé?)"
+          placeholder="Escribe tu pregunta... (ej: añadir pedido enviado: Cliente ABC, 300 matrículas)"
           className="flex-1 bg-transparent border border-white/15 rounded-xl px-4 py-2.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary placeholder:text-muted-foreground/50"
           style={{ color: "oklch(0.92 0.012 236)" }}
           data-ocid="chat.input"

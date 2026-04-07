@@ -7,6 +7,8 @@ import HistorialPage from "./components/HistorialPage";
 import ManualPrintPage from "./components/ManualPrintPage";
 import Orders from "./components/Orders";
 import type { Order } from "./components/Orders";
+import PedidosEnviadosPage from "./components/PedidosEnviadosPage";
+import type { PedidoEnviado } from "./components/PedidosEnviadosPage";
 import PrintHistory from "./components/PrintHistory";
 import type { HistorialEntry } from "./components/PrintHistory";
 import TutorialPage from "./components/TutorialPage";
@@ -40,7 +42,13 @@ const DEFAULT_CONFIG: BarcodeConfig = {
   fontSize: 18,
 };
 
-type ActivePage = "generador" | "registro" | "historial" | "tutorial" | "chat";
+type ActivePage =
+  | "generador"
+  | "registro"
+  | "historial"
+  | "tutorial"
+  | "chat"
+  | "enviados";
 
 export default function App() {
   const [activePage, setActivePage] = useState<ActivePage>("generador");
@@ -62,6 +70,9 @@ export default function App() {
     },
     { id: "2", nombre: "Pedido Beta", total: 500, hecho: 150, tipo: "placas" },
   ]);
+  const [pedidosEnviados, setPedidosEnviados] = useLocalStorage<
+    PedidoEnviado[]
+  >("pedidosEnviados", []);
   const [semanaData, setSemanaData] = useLocalStorage<{
     week: string;
     hecho: number;
@@ -152,12 +163,39 @@ export default function App() {
     setConfig((prev) => ({ ...prev, [field]: value }));
   }
 
-  const tabs: { id: ActivePage; label: string; num: string }[] = [
+  function handleAddPedidoEnviado(p: PedidoEnviado) {
+    setPedidosEnviados((prev) => [p, ...prev]);
+  }
+
+  function handleDeletePedidoEnviado(id: string) {
+    setPedidosEnviados((prev) => prev.filter((p) => p.id !== id));
+  }
+
+  const tabs: {
+    id: ActivePage;
+    label: string;
+    num: string;
+    accent?: string;
+    accentBg?: string;
+  }[] = [
     { id: "generador", label: "Generador", num: "1" },
     { id: "registro", label: "Registro", num: "2" },
     { id: "historial", label: "Historial", num: "3" },
     { id: "tutorial", label: "Guía", num: "?" },
-    { id: "chat", label: "Chat", num: "💬" },
+    {
+      id: "chat",
+      label: "Chat",
+      num: "💬",
+      accent: "oklch(0.696 0.17 162.48)",
+      accentBg: "oklch(0.696 0.17 162.48 / 0.12)",
+    },
+    {
+      id: "enviados",
+      label: "Enviados",
+      num: "📦",
+      accent: "oklch(0.696 0.17 162.48)",
+      accentBg: "oklch(0.696 0.17 162.48 / 0.12)",
+    },
   ];
 
   return (
@@ -195,17 +233,14 @@ export default function App() {
             {tabs.map((tab) => {
               const isActive = activePage === tab.id;
               const isTutorial = tab.id === "tutorial";
-              const isChat = tab.id === "chat";
-              const accentColor = isChat
-                ? "oklch(0.696 0.17 162.48)"
-                : isTutorial
-                  ? "oklch(0.8 0.12 270)"
-                  : "oklch(0.828 0.167 87)";
-              const accentBg = isChat
-                ? "oklch(0.696 0.17 162.48 / 0.12)"
-                : isTutorial
-                  ? "oklch(0.7 0.15 270 / 0.12)"
-                  : "oklch(0.828 0.167 87 / 0.12)";
+              const defaultAccent = isTutorial
+                ? "oklch(0.8 0.12 270)"
+                : "oklch(0.828 0.167 87)";
+              const defaultAccentBg = isTutorial
+                ? "oklch(0.7 0.15 270 / 0.12)"
+                : "oklch(0.828 0.167 87 / 0.12)";
+              const accentColor = tab.accent ?? defaultAccent;
+              const accentBg = tab.accentBg ?? defaultAccentBg;
               return (
                 <button
                   key={tab.id}
@@ -412,7 +447,17 @@ export default function App() {
             onClear={() => setHistorial([])}
           />
         ) : activePage === "chat" ? (
-          <ChatPage historial={historial} pedidos={orders} />
+          <ChatPage
+            historial={historial}
+            pedidos={orders}
+            onAddPedidoEnviado={handleAddPedidoEnviado}
+          />
+        ) : activePage === "enviados" ? (
+          <PedidosEnviadosPage
+            pedidosEnviados={pedidosEnviados}
+            onAdd={handleAddPedidoEnviado}
+            onDelete={handleDeletePedidoEnviado}
+          />
         ) : (
           <TutorialPage />
         )}
