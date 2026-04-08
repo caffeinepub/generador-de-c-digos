@@ -13,8 +13,10 @@ interface ChatPageProps {
 interface PdfAction {
   type: "pdf";
   label: string;
-  handler: "barcode_entry" | "sincodigo_entry" | "resumen";
+  handler: "barcode_entry" | "sincodigo_entry" | "resumen" | "filtered";
   entryIndex?: number;
+  filteredEntries?: HistorialEntry[];
+  summaryLabel?: string;
 }
 
 interface AddEnviadoAction {
@@ -129,6 +131,366 @@ function generateResumenPdf(
 <table><thead><tr><th>Nombre</th><th>Tipo</th><th>Hecho</th><th>Total</th><th>Restante</th><th>Progreso</th></tr></thead>
 <tbody>${orderRows || `<tr><td colspan="6" style="text-align:center;color:#999">Sin pedidos activos</td></tr>`}</tbody></table>
 <script>window.onload=()=>{window.print();}<\/script></body></html>`;
+  const win = window.open("", "_blank");
+  if (!win) return;
+  win.document.write(html);
+  win.document.close();
+}
+
+// ---- Multi-segment PDF filter logic ------------------------------------------
+
+interface PdfSegment {
+  tipo: "con-codigo" | "sin-codigo" | "advertencia" | null; // null = all
+  provider: string | null; // partial match on entry.nombre (case insensitive)
+  limit: number | null; // last N entries
+  onlyToday: boolean;
+  raw: string; // original segment text for debug
+}
+
+interface FilteredSegmentResult {
+  segment: PdfSegment;
+  entries: HistorialEntry[];
+  notFound: boolean;
+}
+
+/**
+ * Parse a natural-language PDF instruction into zero or more filter segments.
+ * Supports "últimas N [tipo] de [proveedor]" patterns joined by "y".
+ */
+function parsePdfSegments(
+  text: string,
+  historial: HistorialEntry[],
+): FilteredSegmentResult[] {
+  const norm = (s: string) =>
+    s
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/\p{Diacritic}/gu, "");
+
+  const msg = norm(text);
+  const today = new Date().toLocaleDateString("es-ES");
+
+  // Check if the message actually mentions a filter-style PDF request
+  // (has tipo/proveedor keywords beyond just "resumen" or "registro N")
+  const hasPdfKeyword =
+    msg.includes("pdf") ||
+    msg.includes("descarga") ||
+    msg.includes("imprime") ||
+    msg.includes("imprimir") ||
+    msg.includes("descargar");
+
+  if (!hasPdfKeyword) return [];
+
+  // Split into segments by " y " connector after stripping the leading "hazme un pdf de / pdf de / etc."
+  const stripped = msg
+    .replace(
+      /^(hazme|dame|genera|haz|hacer)\s+(un\s+)?(pdf|resumen|informe)\s+(de\s+|con\s+)?/i,
+      "",
+    )
+    .replace(
+      /^(pdf|descarga|descargar|imprime|imprimir)\s+(de\s+|con\s+)?/i,
+      "",
+    );
+
+  // Split on " y " only when surrounded by quantity/type tokens to avoid splitting provider names
+  // Strategy: split on " y " only if what follows looks like a new segment (digit or tipo keyword)
+  const segmentTexts = splitIntoSegments(stripped);
+
+  if (segmentTexts.length === 0) return [];
+
+  const results: FilteredSegmentResult[] = [];
+
+  for (const segText of segmentTexts) {
+    const segment = parseOneSegment(segText);
+    if (!segment) continue;
+
+    let filtered = [...historial];
+
+    // Filter by today
+    if (segment.onlyToday) {
+      filtered = filtered.filter((e) => e.fecha === today);
+    }
+
+    // Filter by tipo
+    if (segment.tipo !== null) {
+      if (segment.tipo === "con-codigo") {
+        filtered = filtered.filter((e) => e.tipo === "con-codigo");
+      } else if (segment.tipo === "sin-codigo") {
+        filtered = filtered.filter((e) => e.tipo === "sin-codigo");
+      } else {
+        // "advertencia" — not in HistorialEntry tipo union, skip filter
+        // (entries with undefined tipo may be advertencia-style)
+        filtered = filtered.filter((e) => !e.tipo);
+      }
+    }
+
+    // Filter by provider (partial, case insensitive)
+    if (segment.provider) {
+      const p = norm(segment.provider);
+      filtered = filtered.filter((e) => e.nombre && norm(e.nombre).includes(p));
+    }
+
+    // Take last N (historial is newest-first so slice from front)
+    if (segment.limit !== null) {
+      filtered = filtered.slice(0, segment.limit);
+    }
+
+    results.push({
+      segment,
+      entries: filtered,
+      notFound: filtered.length === 0,
+    });
+  }
+
+  return results;
+}
+
+/** Split a stripped segment string on " y " boundaries only where next part starts a new type/count */
+function splitIntoSegments(text: string): string[] {
+  const typeKeywords = [
+    "matriculas",
+    "matricula",
+    "placas ce",
+    "placas",
+    "placa ce",
+    "placa",
+    "advertencias",
+    "advertencia",
+    "sin codigo",
+    "con codigo",
+  ];
+
+  // Split by " y " and then try to intelligently rejoin or keep
+  const parts = text.split(/\s+y\s+/);
+  if (parts.length <= 1) return parts.filter(Boolean);
+
+  const segments: string[] = [];
+  let current = parts[0];
+
+  for (let i = 1; i < parts.length; i++) {
+    const part = parts[i];
+    const partNorm = part
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/\p{Diacritic}/gu, "");
+
+    // Check if this part starts a new segment (begins with a digit, "ultimas", "los", "las", "los", or a type keyword)
+    const startsNew =
+      /^\d/.test(partNorm) ||
+      partNorm.startsWith("ultimas") ||
+      partNorm.startsWith("los ") ||
+      partNorm.startsWith("las ") ||
+      typeKeywords.some((k) => partNorm.startsWith(k));
+
+    if (startsNew) {
+      segments.push(current.trim());
+      current = part;
+    } else {
+      // Continuation of previous (e.g. provider name with "y" in it)
+      current = `${current} y ${part}`;
+    }
+  }
+  segments.push(current.trim());
+  return segments.filter(Boolean);
+}
+
+function parseOneSegment(text: string): PdfSegment | null {
+  const norm = (s: string) =>
+    s
+      .toLowerCase()
+      .normalize("NFD")
+      .replace(/\p{Diacritic}/gu, "");
+
+  const t = norm(text);
+
+  // Extract limit: "últimas N", "los N", "las N", "N" at start
+  let limit: number | null = null;
+  const limitMatch = t.match(/(?:ultimas?\s+|los?\s+|las?\s+)?(\d+)/);
+  if (limitMatch) {
+    limit = Number.parseInt(limitMatch[1], 10);
+  }
+
+  // Detect "hoy"
+  const onlyToday = t.includes("hoy") || t.includes("de hoy");
+
+  // Detect tipo
+  let tipo: PdfSegment["tipo"] = null;
+  if (
+    t.includes("matriculas") ||
+    t.includes("matricula") ||
+    t.includes("con codigo") ||
+    t.includes("con barras") ||
+    t.includes("barcode")
+  ) {
+    tipo = "con-codigo";
+  } else if (
+    t.includes("placas ce") ||
+    t.includes("placa ce") ||
+    t.includes("sin codigo") ||
+    t.includes("placas") ||
+    t.includes("placa")
+  ) {
+    tipo = "sin-codigo";
+  } else if (t.includes("advertencia")) {
+    tipo = "advertencia";
+  }
+
+  // If no recognizable type and no limit and no today, this segment probably isn't a valid filter
+  if (tipo === null && limit === null && !onlyToday) return null;
+
+  // Extract provider: text after "de [proveedor]" (excluding tipo keywords)
+  let provider: string | null = null;
+  // Remove leading count expressions
+  const withoutCount = text
+    .replace(/^(ultimas?\s+\d+|las?\s+\d+|los?\s+\d+|\d+)\s*/i, "")
+    .replace(/^(ultimas?|las?|los?)\s+/i, "")
+    .trim();
+
+  // Remove tipo keywords to isolate provider
+  const tipoKeywordsOrig = [
+    "matrículas",
+    "matrícula",
+    "matriculas",
+    "matricula",
+    "placas ce",
+    "placa ce",
+    "placas",
+    "placa",
+    "advertencias",
+    "advertencia",
+    "con código",
+    "con codigo",
+    "sin código",
+    "sin codigo",
+  ];
+  let remaining = withoutCount;
+  for (const kw of tipoKeywordsOrig) {
+    const re = new RegExp(`\\b${kw}\\b`, "gi");
+    remaining = remaining.replace(re, "").trim();
+  }
+
+  // remaining should now be: "de [proveedor]" or "del [proveedor]" or "[proveedor]"
+  const deMatch = remaining.match(/^(?:de\s+|del\s+)(.+)$/i);
+  if (deMatch) {
+    provider = deMatch[1].trim();
+  } else if (remaining.length > 1 && !/^\d+$/.test(remaining)) {
+    provider = remaining.trim() || null;
+  }
+
+  // Remove trailing "hoy" from provider if accidentally captured
+  if (provider) {
+    provider = provider
+      .replace(/\s+de\s+hoy\s*$/i, "")
+      .replace(/\s+hoy\s*$/i, "")
+      .trim();
+    if (!provider) provider = null;
+  }
+
+  return { tipo, provider, limit, onlyToday, raw: text };
+}
+
+/** Generate a combined multi-section PDF from filtered historial entries */
+function generateFilteredPdf(
+  segmentResults: FilteredSegmentResult[],
+  summaryLabel: string,
+) {
+  const generatedAt = new Date().toLocaleString("es");
+
+  let allMatriculas = 0;
+  let allPlacas = 0;
+  let allTotal = 0;
+
+  const sectionHtml = segmentResults
+    .filter((r) => !r.notFound)
+    .map((r) => {
+      const { segment, entries } = r;
+      const tipoLabel =
+        segment.tipo === "con-codigo"
+          ? "Matrículas (con código de barras)"
+          : segment.tipo === "sin-codigo"
+            ? "Placas CE (sin código)"
+            : segment.tipo === "advertencia"
+              ? "Advertencia"
+              : "Registros";
+
+      const providerLabel = segment.provider ? ` — ${segment.provider}` : "";
+      const todayLabel = segment.onlyToday ? " (hoy)" : "";
+      const sectionTitle = `${tipoLabel}${providerLabel}${todayLabel}`;
+
+      const sectionTotal = entries.reduce((s, e) => s + e.totalImagenes, 0);
+      if (segment.tipo === "con-codigo") allMatriculas += sectionTotal;
+      else if (segment.tipo === "sin-codigo") allPlacas += sectionTotal;
+      allTotal += sectionTotal;
+
+      const rows = entries
+        .map((e) => {
+          if (e.tipo === "con-codigo") {
+            return `<tr><td>${e.fecha}</td><td>${e.hora ?? "—"}</td><td>${e.operario ?? "—"}</td><td><code>${e.codigoInicio} → ${e.codigoFin}</code></td><td style="text-align:right;font-weight:600">${e.totalImagenes}</td></tr>`;
+          }
+          return `<tr><td>${e.fecha}</td><td>${e.hora ?? "—"}</td><td>${e.operario ?? "—"}</td><td>${e.nombre ?? "Sin nombre"}</td><td style="text-align:right;font-weight:600">${e.totalImagenes}</td></tr>`;
+        })
+        .join("");
+
+      return `<section>
+<h2>${sectionTitle}</h2>
+<table>
+  <thead><tr><th>Fecha</th><th>Hora</th><th>Operario</th><th>${segment.tipo === "con-codigo" ? "Rango de Códigos" : "Proveedor / Nombre"}</th><th style="text-align:right">Cantidad</th></tr></thead>
+  <tbody>${rows}</tbody>
+  <tfoot><tr><td colspan="4" style="text-align:right;font-weight:bold;padding-top:8px">Total sección:</td><td style="text-align:right;font-weight:bold;font-size:15px;padding-top:8px">${sectionTotal.toLocaleString("es")}</td></tr></tfoot>
+</table>
+</section>`;
+    })
+    .join("\n");
+
+  const barcodeScript = segmentResults.some(
+    (r) => !r.notFound && r.segment.tipo === "con-codigo",
+  )
+    ? `<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"><\/script>`
+    : "";
+
+  const summarySection = `
+<section class="summary">
+  <h2>Resumen</h2>
+  <div class="summary-grid">
+    ${allMatriculas > 0 ? `<div class="scard"><div class="sval">${allMatriculas.toLocaleString("es")}</div><div class="slbl">Matrículas</div></div>` : ""}
+    ${allPlacas > 0 ? `<div class="scard"><div class="sval">${allPlacas.toLocaleString("es")}</div><div class="slbl">Placas CE</div></div>` : ""}
+    <div class="scard highlight"><div class="sval">${allTotal.toLocaleString("es")}</div><div class="slbl">Total</div></div>
+  </div>
+</section>`;
+
+  const html = `<!DOCTYPE html><html lang="es"><head><meta charset="UTF-8"/>
+<title>PDF — ${summaryLabel}</title>
+${barcodeScript}
+<style>
+  body{font-family:Arial,sans-serif;padding:32px;color:#111;max-width:900px;margin:0 auto}
+  h1{font-size:22px;margin-bottom:4px;color:#1a1a2e}
+  h2{font-size:15px;margin:28px 0 10px;color:#333;border-left:4px solid #f59e0b;padding-left:10px;background:#fffbeb;padding:6px 10px;border-radius:0 6px 6px 0}
+  .sub{font-size:12px;color:#666;margin-bottom:28px}
+  section{margin-bottom:32px;page-break-inside:avoid}
+  table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
+  th{background:#f5f5f5;text-align:left;padding:8px 10px;border-bottom:2px solid #ddd;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
+  td{padding:7px 10px;border-bottom:1px solid #eee}
+  tfoot td{background:#fafafa}
+  code{font-family:monospace;font-size:11px;background:#f0f0f0;padding:2px 5px;border-radius:3px}
+  .summary{background:#fffbeb;border:2px solid #f59e0b;border-radius:10px;padding:20px;margin-top:32px}
+  .summary h2{background:none;border:none;padding:0;margin:0 0 16px;font-size:16px;color:#92400e}
+  .summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px}
+  .scard{border:1px solid #fcd34d;border-radius:8px;padding:14px;text-align:center;background:#fff}
+  .scard.highlight{background:#f59e0b;border-color:#d97706}
+  .sval{font-size:28px;font-weight:bold;color:#1a1a2e;line-height:1}
+  .scard.highlight .sval{color:#fff}
+  .slbl{font-size:10px;color:#92400e;margin-top:4px;text-transform:uppercase;letter-spacing:.05em}
+  .scard.highlight .slbl{color:#fff8dc}
+  @media print{body{padding:12px}.summary{page-break-inside:avoid}}
+</style>
+</head><body>
+<h1>PDF — ${summaryLabel}</h1>
+<p class="sub">Generado el ${generatedAt}</p>
+${sectionHtml}
+${summarySection}
+<script>window.onload=()=>{window.print();}<\/script>
+</body></html>`;
+
   const win = window.open("", "_blank");
   if (!win) return;
   win.document.write(html);
@@ -340,19 +702,108 @@ function buildBotResponse(
     };
   }
 
-  // ---- PDF requests ----
-  const pdfMatch = msg.match(
-    /pdf.*registro[^\d]*(\d+)|registro[^\d]*(\d+).*pdf/,
-  );
+  // ---- Complex/filtered PDF requests (multi-segment) ----
+  const hasPdfKeyword =
+    msg.includes("pdf") ||
+    msg.includes("descarga") ||
+    msg.includes("descargar") ||
+    msg.includes("imprime") ||
+    msg.includes("imprimir");
+
+  const hasFilterKeyword =
+    msg.includes("placa") ||
+    msg.includes("matricula") ||
+    msg.includes("advertencia") ||
+    msg.includes("proveedor") ||
+    msg.includes("ultimas") ||
+    msg.includes("últimas") ||
+    /\d+\s+(placa|matricula|advertencia)/.test(msg);
+
+  if (hasPdfKeyword && hasFilterKeyword) {
+    // Try to parse segments
+    const segmentResults = parsePdfSegments(userText, historial);
+
+    if (segmentResults.length > 0) {
+      // Build confirmation text
+      const confirmParts: string[] = [];
+      const notFoundParts: string[] = [];
+
+      for (const r of segmentResults) {
+        const tipoLabel =
+          r.segment.tipo === "con-codigo"
+            ? "matrículas"
+            : r.segment.tipo === "sin-codigo"
+              ? "placas CE"
+              : r.segment.tipo === "advertencia"
+                ? "advertencias"
+                : "registros";
+        const provLabel = r.segment.provider
+          ? ` de **${r.segment.provider}**`
+          : "";
+        const limitLabel = r.segment.limit
+          ? `las ${r.segment.limit} últimas `
+          : "";
+        const todayLabel = r.segment.onlyToday ? " de hoy" : "";
+
+        if (r.notFound) {
+          notFoundParts.push(
+            `⚠️ No encontré registros de ${limitLabel}${tipoLabel}${provLabel}${todayLabel} en el historial.`,
+          );
+        } else {
+          confirmParts.push(
+            `✅ **${r.entries.length} ${tipoLabel}**${provLabel}${todayLabel} → ${r.entries.reduce((s, e) => s + e.totalImagenes, 0).toLocaleString("es")} unidades`,
+          );
+        }
+      }
+
+      const hasResults = confirmParts.length > 0;
+
+      if (!hasResults) {
+        const notFoundText = notFoundParts.join("\n");
+        return {
+          text: `No encontré registros para generar el PDF:\n\n${notFoundText}\n\nAsegúrate de que los registros existen en el historial y que el nombre del proveedor coincide.`,
+        };
+      }
+
+      const summaryParts = confirmParts.join("\n");
+      const notFoundText =
+        notFoundParts.length > 0 ? `\n\n${notFoundParts.join("\n")}` : "";
+      const filteredEntries = segmentResults.flatMap((r) => r.entries);
+      const summaryLabel = segmentResults
+        .filter((r) => !r.notFound)
+        .map((r) => {
+          const tipoLabel =
+            r.segment.tipo === "con-codigo"
+              ? "Matrículas"
+              : r.segment.tipo === "sin-codigo"
+                ? "Placas CE"
+                : r.segment.tipo === "advertencia"
+                  ? "Advertencia"
+                  : "Registros";
+          return r.segment.provider
+            ? `${tipoLabel} ${r.segment.provider}`
+            : tipoLabel;
+        })
+        .join(" + ");
+
+      return {
+        text: `Generando PDF con:\n\n${summaryParts}${notFoundText}\n\nPulsa el botón para abrir el PDF.`,
+        action: {
+          type: "pdf",
+          label: "Generar PDF filtrado",
+          handler: "filtered",
+          filteredEntries,
+          summaryLabel,
+        },
+      };
+    }
+  }
+
+  // ---- Simple PDF requests: "resumen en PDF" ----
   const resumPdf =
     msg.includes("resumen") &&
     (msg.includes("pdf") ||
       msg.includes("descarga") ||
-      msg.includes("imprimir"));
-  const generalPdf =
-    !pdfMatch &&
-    (msg.includes("pdf") ||
-      msg.includes("descargar") ||
       msg.includes("imprimir"));
 
   if (resumPdf) {
@@ -365,6 +816,11 @@ function buildBotResponse(
       },
     };
   }
+
+  // ---- PDF by registro number ----
+  const pdfMatch = msg.match(
+    /pdf.*registro[^\d]*(\d+)|registro[^\d]*(\d+).*pdf/,
+  );
 
   if (pdfMatch) {
     const numStr = pdfMatch[1] || pdfMatch[2];
@@ -387,6 +843,12 @@ function buildBotResponse(
     };
   }
 
+  // ---- Generic PDF (no specific filter) ----
+  const generalPdf =
+    msg.includes("pdf") ||
+    msg.includes("descargar") ||
+    msg.includes("imprimir");
+
   if (generalPdf) {
     if (historial.length === 0) {
       return {
@@ -401,7 +863,7 @@ function buildBotResponse(
       )
       .join("\n");
     return {
-      text: `Puedo generar un PDF de cualquier registro. Dime el número, por ejemplo: "PDF del registro 1".\n\nTus últimos registros:\n${list}${historial.length > 5 ? `\n...y ${historial.length - 5} más.` : ""}`,
+      text: `Puedo generar PDFs personalizados con filtros. Ejemplos:\n• "hazme un PDF de las últimas 12 placas CE de porcelanosa"\n• "PDF de las 30 matrículas de TAS"\n• "PDF de las placas CE de hoy"\n\nO dime el número de registro: "PDF del registro 1".\n\nTus últimos registros:\n${list}${historial.length > 5 ? `\n...y ${historial.length - 5} más.` : ""}`,
     };
   }
 
@@ -428,7 +890,7 @@ function buildBotResponse(
         text: `No encontré ningún registro en el historial con la serie **${seriesPrefix}**.\n\nAsegúrate de que el código de inicio o fin de los registros empiece por "${seriesPrefix}". Puedes pedir "resumen del historial" para ver todos los registros.`,
       };
     }
-    const lastCode = getLastCodeInSeries(matched);
+    const lastCodeSeries = getLastCodeInSeries(matched);
     const entryList = matched
       .slice(0, 8)
       .map(
@@ -437,7 +899,7 @@ function buildBotResponse(
       )
       .join("\n");
     return {
-      text: `🏷️ Serie **${seriesPrefix}** — ${matched.length} registro${matched.length !== 1 ? "s" : ""} encontrado${matched.length !== 1 ? "s" : ""}:\n\n${entryList}${matched.length > 8 ? `\n...y ${matched.length - 8} más.` : ""}\n\n📍 Último código de la serie: **${lastCode ?? "—"}**`,
+      text: `🏷️ Serie **${seriesPrefix}** — ${matched.length} registro${matched.length !== 1 ? "s" : ""} encontrado${matched.length !== 1 ? "s" : ""}:\n\n${entryList}${matched.length > 8 ? `\n...y ${matched.length - 8} más.` : ""}\n\n📍 Último código de la serie: **${lastCodeSeries ?? "—"}**`,
     };
   }
 
@@ -634,13 +1096,13 @@ function buildBotResponse(
     msg.includes("para que")
   ) {
     return {
-      text: `Soy tu asistente de producción. Puedo ayudarte con:\n\n• 🏷️ **Códigos**: "¿por qué placa me quedé?", "último código"\n• 🔍 **Series**: "¿por qué matrícula de TAS me quedé?", "último código ABC"\n• 📊 **Totales**: "¿cuántas matrículas hice?", "¿cuántas placas hice?"\n• 📦 **Pedidos**: "¿qué pedidos tengo activos?"\n• 📋 **Historial**: "resumen del historial", "todos los registros"\n• 📅 **Hoy**: "¿cuánto hice hoy?"\n• 📈 **Semana**: "¿cuánto llevo esta semana?", "objetivo semanal"\n• 📄 **PDFs**: "PDF del registro 1", "dame un resumen en PDF"\n• 📤 **Pedidos enviados**: "añadir pedido enviado: Cliente ABC, 300 matrículas"\n\n¿En qué puedo ayudarte?`,
+      text: `Soy tu asistente de producción. Puedo ayudarte con:\n\n• 🏷️ **Códigos**: "¿por qué placa me quedé?", "último código"\n• 🔍 **Series**: "¿por qué matrícula de TAS me quedé?", "último código ABC"\n• 📊 **Totales**: "¿cuántas matrículas hice?", "¿cuántas placas hice?"\n• 📦 **Pedidos**: "¿qué pedidos tengo activos?"\n• 📋 **Historial**: "resumen del historial", "todos los registros"\n• 📅 **Hoy**: "¿cuánto hice hoy?"\n• 📈 **Semana**: "¿cuánto llevo esta semana?", "objetivo semanal"\n• 📄 **PDFs con filtros**: "hazme un PDF de las últimas 12 placas CE de porcelanosa y las 30 matrículas de TAS"\n• 📤 **Pedidos enviados**: "añadir pedido enviado: Cliente ABC, 300 matrículas"\n\n¿En qué puedo ayudarte?`,
     };
   }
 
   // ---- Fallback ----
   return {
-    text: `No he entendido bien tu pregunta 🤔. Puedo responder sobre:\n• Último código generado o por serie ("TAS", "ABC"…)\n• Pedidos activos y su progreso\n• Historial completo de registros\n• Producción de hoy o esta semana\n• Generar PDFs\n• Añadir pedidos enviados\n\nPrueba con alguna de las preguntas rápidas de abajo, o dime "ayuda" para ver todo lo que puedo hacer.`,
+    text: `No he entendido bien tu pregunta 🤔. Puedo responder sobre:\n• Último código generado o por serie ("TAS", "ABC"…)\n• Pedidos activos y su progreso\n• Historial completo de registros\n• Producción de hoy o esta semana\n• Generar PDFs con filtros (ej: "PDF de las últimas 12 placas CE de porcelanosa")\n• Añadir pedidos enviados\n\nPrueba con alguna de las preguntas rápidas de abajo, o dime "ayuda" para ver todo lo que puedo hacer.`,
   };
 }
 
@@ -679,11 +1141,12 @@ const QUICK_QUESTIONS = [
   "¿Cuántas matrículas hice?",
   "¿Cuánto llevo esta semana?",
   "Dame un resumen en PDF",
+  "PDF de las últimas 12 placas CE de porcelanosa",
   "Añadir pedido enviado",
 ];
 
 const WELCOME_MSG =
-  "¡Hola! Soy tu asistente de producción 🤖. Puedes preguntarme cosas como: ¿por qué matrícula de TAS me quedé?, ¿resumen del historial?, ¿cuántas matrículas hice?, ¿qué pedidos tengo activos? También puedo generar PDFs y añadir pedidos enviados.";
+  "¡Hola! Soy tu asistente de producción 🤖. Puedes preguntarme cosas como: ¿por qué matrícula de TAS me quedé?, ¿resumen del historial?, ¿cuántas matrículas hice?, ¿qué pedidos tengo activos? También puedo generar PDFs personalizados: «hazme un PDF de las últimas 12 placas CE de porcelanosa y las 30 matrículas de TAS».";
 
 // ---- Add Enviado inline form -------------------------------------------------
 
@@ -836,7 +1299,19 @@ export default function ChatPage({
 
   useEffect(() => {
     try {
-      localStorage.setItem("chatHistory", JSON.stringify(messages));
+      // Serialize only safe fields (exclude filteredEntries to avoid localStorage bloat)
+      const toSave = messages.map((m) => {
+        if (
+          m.action?.type === "pdf" &&
+          (m.action as PdfAction).handler === "filtered"
+        ) {
+          const { filteredEntries: _fe, ...rest } = m.action as PdfAction;
+          void _fe;
+          return { ...m, action: rest };
+        }
+        return m;
+      });
+      localStorage.setItem("chatHistory", JSON.stringify(toSave));
     } catch {
       // quota exceeded — ignore
     }
@@ -874,10 +1349,34 @@ export default function ChatPage({
       hecho: 0,
     });
     const objetivo = getFromLS<number>("objetivo", 5000);
-    const lastCode = getFromLS<string>("lastGeneratedCode", "");
+    const lc = getFromLS<string>("lastGeneratedCode", "");
 
-    if (action.handler === "resumen") {
-      generateResumenPdf(historial, pedidos, semana, objetivo, lastCode);
+    if (action.handler === "filtered") {
+      const entries = action.filteredEntries ?? [];
+      if (entries.length === 0) {
+        addMessage({
+          role: "bot",
+          text: "⚠️ No hay entradas para generar el PDF filtrado. Los datos del chat anterior pueden haberse perdido al recargar la página. Por favor vuelve a pedir el PDF.",
+        });
+        return;
+      }
+      // Build fake segment results from the flat entries list for the PDF generator
+      const segResults: FilteredSegmentResult[] = [
+        {
+          segment: {
+            tipo: null,
+            provider: null,
+            limit: null,
+            onlyToday: false,
+            raw: action.summaryLabel ?? "filtrado",
+          },
+          entries,
+          notFound: false,
+        },
+      ];
+      generateFilteredPdf(segResults, action.summaryLabel ?? "PDF Filtrado");
+    } else if (action.handler === "resumen") {
+      generateResumenPdf(historial, pedidos, semana, objetivo, lc);
     } else if (
       action.handler === "barcode_entry" &&
       action.entryIndex !== undefined
@@ -941,8 +1440,8 @@ export default function ChatPage({
               Asistente de Producción
             </h2>
             <p className="text-xs text-muted-foreground">
-              Pregúntame sobre códigos, pedidos, historial, genera PDFs o añade
-              pedidos enviados
+              Pregúntame sobre códigos, pedidos, historial · genera PDFs con
+              filtros
             </p>
           </div>
         </div>
@@ -1097,7 +1596,7 @@ export default function ChatPage({
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && handleSend()}
-          placeholder="Escribe tu pregunta... (ej: añadir pedido enviado: Cliente ABC, 300 matrículas)"
+          placeholder="Ej: hazme un PDF de las últimas 12 placas CE de porcelanosa y las 30 matrículas de TAS"
           className="flex-1 bg-transparent border border-white/15 rounded-xl px-4 py-2.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary placeholder:text-muted-foreground/50"
           style={{ color: "oklch(0.92 0.012 236)" }}
           data-ocid="chat.input"
