@@ -135,7 +135,89 @@ function generateResumenPdf(
   win.document.close();
 }
 
-// ---- Bot logic ---------------------------------------------------------------
+// ---- Series detection helpers -----------------------------------------------
+
+/** Extract a series prefix from messages like "¿por qué matrícula de TAS me quedé?" */
+function extractSeriesPrefix(text: string): string | null {
+  // Explicit "de X", "con X", "en X" after matricula/placa/codigo/serie keywords
+  const explicitMatch = text.match(
+    /(?:matricula|placa|codigo|serie|prefijo|secuencia)s?\s+(?:de|con|en)\s+([A-Za-z0-9]{2,8})/i,
+  );
+  if (explicitMatch) return explicitMatch[1].toUpperCase();
+
+  // "¿por qué X me quedé?" / "último código X" / "dónde me quedé con X"
+  const quedéMatch = text.match(
+    /(?:quede|quedo|de|con|en)\s+([A-Za-z]{2,6})\b/i,
+  );
+  if (quedéMatch) {
+    const candidate = quedéMatch[1].toUpperCase();
+    // Exclude common Spanish words
+    const skip = new Set([
+      "QUE",
+      "LAS",
+      "LOS",
+      "UNA",
+      "UNO",
+      "POR",
+      "CON",
+      "DEL",
+      "LOS",
+      "MIS",
+      "SUS",
+      "HOY",
+      "DIA",
+      "ESE",
+      "ESA",
+      "EST",
+      "MAS",
+      "TAM",
+      "TODO",
+      "TODA",
+    ]);
+    if (!skip.has(candidate)) return candidate;
+  }
+
+  // "último código TAS" / "TAS?" / just typed a 2-6 letter prefix alone
+  const aloneMatch = text.match(/^([A-Za-z]{2,6})\s*\??$/);
+  if (aloneMatch) return aloneMatch[1].toUpperCase();
+
+  // "¿dónde me quedé con TAS?" style
+  const conMatch = text.match(/con\s+([A-Za-z0-9]{2,8})/i);
+  if (conMatch) return conMatch[1].toUpperCase();
+
+  return null;
+}
+
+/** Find all historial entries whose codes start with the given prefix */
+function findEntriesByPrefix(
+  historial: HistorialEntry[],
+  prefix: string,
+): HistorialEntry[] {
+  const p = prefix.toLowerCase();
+  return historial.filter(
+    (e) =>
+      e.codigoInicio?.toLowerCase().startsWith(p) ||
+      e.codigoFin?.toLowerCase().startsWith(p),
+  );
+}
+
+/** Get the highest codigoFin among a set of entries (last used code in series) */
+function getLastCodeInSeries(entries: HistorialEntry[]): string | null {
+  if (entries.length === 0) return null;
+  // Sort by codigoFin numeric value descending
+  const sorted = [...entries].sort((a, b) => {
+    const numA = Number.parseInt(
+      (a.codigoFin ?? "").replace(/\D/g, "") || "0",
+      10,
+    );
+    const numB = Number.parseInt(
+      (b.codigoFin ?? "").replace(/\D/g, "") || "0",
+      10,
+    );
+    return numB - numA;
+  });
+  return sorted[0].codigoFin ?? null;
+}
 
 function getFromLS<T>(key: string, fallback: T): T {
   try {
@@ -323,6 +405,73 @@ function buildBotResponse(
     };
   }
 
+  // ---- Series detection: "¿por qué matrícula de TAS me quedé?" ----
+  const seriesPrefix = extractSeriesPrefix(userText);
+  const isSeriesQuery =
+    seriesPrefix !== null &&
+    (msg.includes("matricula") ||
+      msg.includes("placa") ||
+      msg.includes("codigo") ||
+      msg.includes("serie") ||
+      msg.includes("quede") ||
+      msg.includes("quedé") ||
+      msg.includes("ultimo") ||
+      msg.includes("último") ||
+      msg.includes("donde") ||
+      msg.includes("dónde") ||
+      seriesPrefix.length >= 2);
+
+  if (isSeriesQuery && seriesPrefix) {
+    const matched = findEntriesByPrefix(historial, seriesPrefix);
+    if (matched.length === 0) {
+      return {
+        text: `No encontré ningún registro en el historial con la serie **${seriesPrefix}**.\n\nAsegúrate de que el código de inicio o fin de los registros empiece por "${seriesPrefix}". Puedes pedir "resumen del historial" para ver todos los registros.`,
+      };
+    }
+    const lastCode = getLastCodeInSeries(matched);
+    const entryList = matched
+      .slice(0, 8)
+      .map(
+        (e) =>
+          `• Reg. #${historial.indexOf(e) + 1}: ${e.fecha}${e.hora ? ` ${e.hora}` : ""} — ${e.codigoInicio} → **${e.codigoFin}** (${e.totalImagenes} uds.)${e.operario ? ` | ${e.operario}` : ""}`,
+      )
+      .join("\n");
+    return {
+      text: `🏷️ Serie **${seriesPrefix}** — ${matched.length} registro${matched.length !== 1 ? "s" : ""} encontrado${matched.length !== 1 ? "s" : ""}:\n\n${entryList}${matched.length > 8 ? `\n...y ${matched.length - 8} más.` : ""}\n\n📍 Último código de la serie: **${lastCode ?? "—"}**`,
+    };
+  }
+
+  // ---- Totales por tipo ----
+  if (
+    msg.includes("cuantas matriculas") ||
+    msg.includes("cuántas matriculas") ||
+    msg.includes("total matriculas") ||
+    (msg.includes("matriculas") && msg.includes("hice")) ||
+    msg.includes("cuantas placas") ||
+    msg.includes("cuántas placas") ||
+    msg.includes("total placas") ||
+    (msg.includes("placas") && msg.includes("hice")) ||
+    msg.includes("cuantas advertencias") ||
+    msg.includes("cuántas advertencias") ||
+    (msg.includes("advertencia") && msg.includes("hice"))
+  ) {
+    if (historial.length === 0) {
+      return {
+        text: "El historial está vacío. No hay datos de producción todavía.",
+      };
+    }
+    const totalMatriculas = historial
+      .filter((e) => e.tipo === "con-codigo")
+      .reduce((s, e) => s + e.totalImagenes, 0);
+    const totalPlacas = historial
+      .filter((e) => e.tipo === "sin-codigo")
+      .reduce((s, e) => s + e.totalImagenes, 0);
+    const totalAll = historial.reduce((s, e) => s + e.totalImagenes, 0);
+    return {
+      text: `📊 Totales por tipo en el historial completo:\n\n• 🏷️ **Matrículas (con código):** ${totalMatriculas.toLocaleString("es")} unidades\n• 🪧 **Placas CE (sin código):** ${totalPlacas.toLocaleString("es")} unidades\n• 📦 **Total global:** ${totalAll.toLocaleString("es")} unidades`,
+    };
+  }
+
   // ---- Último código / placa ----
   if (
     msg.includes("placa") ||
@@ -377,21 +526,24 @@ function buildBotResponse(
       const bar =
         "█".repeat(Math.floor(pct / 10)) +
         "░".repeat(10 - Math.floor(pct / 10));
-      return `• **${o.nombre}** (${o.tipo})\n  ${bar} ${pct}% — ${o.hecho}/${o.total} hechos, quedan ${rest}`;
+      const responsableStr = o.responsable ? ` | 👤 ${o.responsable}` : "";
+      return `• **${o.nombre}** (${o.tipo})${responsableStr}\n  ${bar} ${pct}% — ${o.hecho}/${o.total} hechos, quedan ${rest}`;
     });
     return {
       text: `Tienes **${pedidos.length}** pedido${pedidos.length > 1 ? "s" : ""} activo${pedidos.length > 1 ? "s" : ""}:\n\n${lines.join("\n\n")}`,
     };
   }
 
-  // ---- Historial / registros ----
+  // ---- Historial completo / resumen del historial ----
   if (
     msg.includes("historial") ||
     msg.includes("registro") ||
     msg.includes("impresion") ||
     msg.includes("impresión") ||
     msg.includes("registre") ||
-    msg.includes("registré")
+    msg.includes("registré") ||
+    msg.includes("resumen del historial") ||
+    msg.includes("todos los registros")
   ) {
     if (historial.length === 0) {
       return {
@@ -401,15 +553,29 @@ function buildBotResponse(
     const totalAll = historial.reduce((s, e) => s + e.totalImagenes, 0);
     const conCodigo = historial.filter((e) => e.tipo !== "sin-codigo");
     const sinCodigo = historial.filter((e) => e.tipo === "sin-codigo");
-    const last3 = historial
-      .slice(0, 3)
+
+    // If user asks for "resumen del historial" or "todos los registros", list all
+    const isFullListing =
+      msg.includes("resumen del historial") ||
+      msg.includes("todos los registros") ||
+      msg.includes("lista") ||
+      msg.includes("listado");
+
+    const entries = isFullListing ? historial : historial.slice(0, 5);
+    const entryList = entries
       .map(
         (e, i) =>
-          `• #${i + 1}: ${e.fecha}${e.hora ? ` ${e.hora}` : ""} — ${e.tipo === "sin-codigo" ? `${e.totalImagenes} placas${e.nombre ? ` (${e.nombre})` : ""}` : `${e.codigoInicio} → ${e.codigoFin} (${e.totalImagenes})`}`,
+          `• #${i + 1}: ${e.fecha}${e.hora ? ` ${e.hora}` : ""}${e.operario ? ` | ${e.operario}` : ""} — ${e.tipo === "sin-codigo" ? `${e.totalImagenes} placas${e.nombre ? ` (${e.nombre})` : ""}` : `${e.codigoInicio} → ${e.codigoFin} (${e.totalImagenes})`}`,
       )
       .join("\n");
+
+    const trailer =
+      !isFullListing && historial.length > 5
+        ? `\n...y ${historial.length - 5} más. Di "todos los registros" para verlos todos.`
+        : "";
+
     return {
-      text: `Tienes **${historial.length}** registros en total (**${totalAll.toLocaleString("es")}** unidades).\n• Con código de barras: ${conCodigo.length}\n• Sin código (placas CE): ${sinCodigo.length}\n\nÚltimos registros:\n${last3}`,
+      text: `📋 Historial de impresión — **${historial.length}** registros (**${totalAll.toLocaleString("es")}** unidades):\n• Con código de barras: **${conCodigo.length}**\n• Sin código (placas CE): **${sinCodigo.length}**\n\n${entryList}${trailer}`,
     };
   }
 
@@ -468,13 +634,13 @@ function buildBotResponse(
     msg.includes("para que")
   ) {
     return {
-      text: `Soy tu asistente de producción. Puedo ayudarte con:\n\n• 🏷️ **Códigos**: "¿por qué placa me quedé?", "último código"\n• 📦 **Pedidos**: "¿qué pedidos tengo activos?"\n• 📋 **Historial**: "¿cuántos registros hay?", "muéstrame el historial"\n• 📅 **Hoy**: "¿cuánto hice hoy?"\n• 📈 **Semana**: "¿cuánto llevo esta semana?", "objetivo semanal"\n• 📄 **PDFs**: "PDF del registro 1", "dame un resumen en PDF"\n• 📤 **Pedidos enviados**: "añadir pedido enviado: Cliente ABC, 300 matrículas"\n\n¿En qué puedo ayudarte?`,
+      text: `Soy tu asistente de producción. Puedo ayudarte con:\n\n• 🏷️ **Códigos**: "¿por qué placa me quedé?", "último código"\n• 🔍 **Series**: "¿por qué matrícula de TAS me quedé?", "último código ABC"\n• 📊 **Totales**: "¿cuántas matrículas hice?", "¿cuántas placas hice?"\n• 📦 **Pedidos**: "¿qué pedidos tengo activos?"\n• 📋 **Historial**: "resumen del historial", "todos los registros"\n• 📅 **Hoy**: "¿cuánto hice hoy?"\n• 📈 **Semana**: "¿cuánto llevo esta semana?", "objetivo semanal"\n• 📄 **PDFs**: "PDF del registro 1", "dame un resumen en PDF"\n• 📤 **Pedidos enviados**: "añadir pedido enviado: Cliente ABC, 300 matrículas"\n\n¿En qué puedo ayudarte?`,
     };
   }
 
   // ---- Fallback ----
   return {
-    text: `No he entendido bien tu pregunta 🤔. Puedo responder sobre:\n• Último código generado\n• Pedidos activos y su progreso\n• Historial de registros\n• Producción de hoy o esta semana\n• Generar PDFs\n• Añadir pedidos enviados\n\nPrueba con alguna de las preguntas rápidas de abajo, o dime "ayuda" para ver todo lo que puedo hacer.`,
+    text: `No he entendido bien tu pregunta 🤔. Puedo responder sobre:\n• Último código generado o por serie ("TAS", "ABC"…)\n• Pedidos activos y su progreso\n• Historial completo de registros\n• Producción de hoy o esta semana\n• Generar PDFs\n• Añadir pedidos enviados\n\nPrueba con alguna de las preguntas rápidas de abajo, o dime "ayuda" para ver todo lo que puedo hacer.`,
   };
 }
 
@@ -506,15 +672,18 @@ function renderText(text: string): React.ReactNode {
 
 const QUICK_QUESTIONS = [
   "¿Por qué placa me quedé?",
+  "¿Por qué matrícula de TAS me quedé?",
+  "¿Resumen del historial?",
   "¿Qué pedidos tengo activos?",
   "¿Cuánto hice hoy?",
+  "¿Cuántas matrículas hice?",
   "¿Cuánto llevo esta semana?",
   "Dame un resumen en PDF",
   "Añadir pedido enviado",
 ];
 
 const WELCOME_MSG =
-  "¡Hola! Soy tu asistente de producción 🤖. Puedes preguntarme cosas como: ¿por qué placa me quedé?, ¿qué pedidos tengo activos?, ¿cuánto hice hoy? También puedo generar PDFs y añadir pedidos enviados si me lo pides.";
+  "¡Hola! Soy tu asistente de producción 🤖. Puedes preguntarme cosas como: ¿por qué matrícula de TAS me quedé?, ¿resumen del historial?, ¿cuántas matrículas hice?, ¿qué pedidos tengo activos? También puedo generar PDFs y añadir pedidos enviados.";
 
 // ---- Add Enviado inline form -------------------------------------------------
 

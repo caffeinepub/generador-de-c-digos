@@ -11,6 +11,7 @@ export interface Order {
   tipo?: "matriculas" | "placas" | "advertencia";
   codigoInicio?: string;
   codigoFin?: string;
+  responsable?: string;
 }
 
 interface OrdersProps {
@@ -24,6 +25,7 @@ interface OrdersProps {
     tipo: Order["tipo"],
     codigoInicio?: string,
     codigoFin?: string,
+    responsable?: string,
   ) => void;
   onUpdateOrder: (id: string, changes: Partial<Order>) => void;
   onHistorialAdd: (entry: HistorialEntry) => void;
@@ -102,6 +104,7 @@ export default function Orders({
   const [modalTipo, setModalTipo] = useState<Order["tipo"]>("matriculas");
   const [modalTotal, setModalTotal] = useState(1000);
   const [modalCodInicio, setModalCodInicio] = useState("");
+  const [modalResponsable, setModalResponsable] = useState("");
 
   function handleAdd() {
     if (!nombre.trim()) return;
@@ -121,11 +124,13 @@ export default function Orders({
       modalTipo,
       modalCodInicio || undefined,
       autoCodigoFin,
+      modalResponsable.trim() || undefined,
     );
     setNombre("");
     setModalTotal(1000);
     setModalTipo("matriculas");
     setModalCodInicio("");
+    setModalResponsable("");
     setShowModal(false);
   }
 
@@ -290,7 +295,7 @@ export default function Orders({
             )}
 
             {/* Total a producir */}
-            <div className="mb-5">
+            <div className="mb-4">
               <label
                 htmlFor="modal-total"
                 className="text-xs text-muted-foreground block mb-1"
@@ -308,6 +313,25 @@ export default function Orders({
               <p className="text-[10px] text-muted-foreground mt-1">
                 Total de {TIPO_LABELS[modalTipo!]} a producir en este pedido
               </p>
+            </div>
+
+            {/* Responsable */}
+            <div className="mb-5">
+              <label
+                htmlFor="modal-responsable"
+                className="text-xs text-muted-foreground block mb-1"
+              >
+                ¿Quién lo hace? / Responsable{" "}
+                <span className="text-muted-foreground/50">(opcional)</span>
+              </label>
+              <input
+                id="modal-responsable"
+                type="text"
+                value={modalResponsable}
+                onChange={(e) => setModalResponsable(e.target.value)}
+                placeholder="Ej: Juan, María..."
+                className={`w-full ${inputCls}`}
+              />
             </div>
 
             <div className="flex gap-2">
@@ -420,6 +444,18 @@ export default function Orders({
                           }}
                         >
                           {TIPO_LABELS[order.tipo]}
+                        </span>
+                      )}
+                      {order.responsable && (
+                        <span
+                          className="text-[10px] px-2 py-0.5 rounded-full font-medium"
+                          style={{
+                            background: "oklch(0.7 0.15 270 / 0.15)",
+                            color: "oklch(0.82 0.1 270)",
+                            border: "1px solid oklch(0.7 0.15 270 / 0.25)",
+                          }}
+                        >
+                          👤 {order.responsable}
                         </span>
                       )}
                       {done && (

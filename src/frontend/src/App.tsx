@@ -115,6 +115,7 @@ export default function App() {
     tipo: Order["tipo"],
     codigoInicio?: string,
     codigoFin?: string,
+    responsable?: string,
   ) {
     setOrders((prev) => [
       ...prev,
@@ -126,6 +127,7 @@ export default function App() {
         tipo,
         codigoInicio,
         codigoFin,
+        responsable,
       },
     ]);
   }
