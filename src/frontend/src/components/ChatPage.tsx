@@ -16,7 +16,9 @@ interface PdfAction {
   handler: "barcode_entry" | "sincodigo_entry" | "resumen" | "filtered";
   entryIndex?: number;
   filteredEntries?: HistorialEntry[];
+  segmentResults?: FilteredSegmentResult[];
   summaryLabel?: string;
+  sinImagen?: boolean;
 }
 
 interface AddEnviadoAction {
@@ -151,6 +153,7 @@ interface FilteredSegmentResult {
   segment: PdfSegment;
   entries: HistorialEntry[];
   notFound: boolean;
+  sinImagen?: boolean;
 }
 
 /**
@@ -171,7 +174,6 @@ function parsePdfSegments(
   const today = new Date().toLocaleDateString("es-ES");
 
   // Check if the message actually mentions a filter-style PDF request
-  // (has tipo/proveedor keywords beyond just "resumen" or "registro N")
   const hasPdfKeyword =
     msg.includes("pdf") ||
     msg.includes("descarga") ||
@@ -181,19 +183,32 @@ function parsePdfSegments(
 
   if (!hasPdfKeyword) return [];
 
-  // Split into segments by " y " connector after stripping the leading "hazme un pdf de / pdf de / etc."
+  // Detect "sin imagen" flag globally for this PDF request
+  const sinImagen =
+    msg.includes("sin imagen") ||
+    msg.includes("sin imagenes") ||
+    msg.includes("sin fotos") ||
+    msg.includes("solo total") ||
+    msg.includes("solo datos");
+
+  // Split into segments by " y " connector after stripping the leading command phrase
   const stripped = msg
     .replace(
-      /^(hazme|dame|genera|haz|hacer)\s+(un\s+)?(pdf|resumen|informe)\s+(de\s+|con\s+)?/i,
+      /^(hazme|dame|genera|haz|hacer)\s+(un\s+)?(pdf|resumen|informe)\s+(sin\s+imagen\s+)?(de\s+|con\s+)?/i,
       "",
     )
     .replace(
-      /^(pdf|descarga|descargar|imprime|imprimir)\s+(de\s+|con\s+)?/i,
+      /^(pdf|descarga|descargar|imprime|imprimir)\s+(sin\s+imagen\s+)?(de\s+|con\s+)?/i,
       "",
-    );
+    )
+    // Remove "sin imagen" from the stripped text so it doesn't confuse type detection
+    .replace(/\bsin\s+imagen(?:es)?\b/gi, "")
+    .replace(/\bsin\s+fotos?\b/gi, "")
+    .replace(/\bsolo\s+total(?:es)?\b/gi, "")
+    .replace(/\bsolo\s+datos?\b/gi, "")
+    .trim();
 
   // Split on " y " only when surrounded by quantity/type tokens to avoid splitting provider names
-  // Strategy: split on " y " only if what follows looks like a new segment (digit or tipo keyword)
   const segmentTexts = splitIntoSegments(stripped);
 
   if (segmentTexts.length === 0) return [];
@@ -218,16 +233,22 @@ function parsePdfSegments(
       } else if (segment.tipo === "sin-codigo") {
         filtered = filtered.filter((e) => e.tipo === "sin-codigo");
       } else {
-        // "advertencia" — not in HistorialEntry tipo union, skip filter
-        // (entries with undefined tipo may be advertencia-style)
-        filtered = filtered.filter((e) => !e.tipo);
+        // "advertencia" entries may have tipo undefined or "advertencia"
+        filtered = filtered.filter(
+          (e) => !e.tipo || (e.tipo as string) === "advertencia",
+        );
       }
     }
 
-    // Filter by provider (partial, case insensitive)
+    // Filter by provider (partial, case insensitive) — check nombre, codigoInicio, codigoFin
     if (segment.provider) {
       const p = norm(segment.provider);
-      filtered = filtered.filter((e) => e.nombre && norm(e.nombre).includes(p));
+      filtered = filtered.filter(
+        (e) =>
+          (e.nombre && norm(e.nombre).includes(p)) ||
+          (e.codigoInicio && norm(e.codigoInicio).includes(p)) ||
+          (e.codigoFin && norm(e.codigoFin).includes(p)),
+      );
     }
 
     // Take last N (historial is newest-first so slice from front)
@@ -239,6 +260,7 @@ function parsePdfSegments(
       segment,
       entries: filtered,
       notFound: filtered.length === 0,
+      sinImagen,
     });
   }
 
@@ -302,20 +324,25 @@ function parseOneSegment(text: string): PdfSegment | null {
       .replace(/\p{Diacritic}/gu, "");
 
   const t = norm(text);
-
-  // Extract limit: "últimas N", "los N", "las N", "N" at start
-  let limit: number | null = null;
-  const limitMatch = t.match(/(?:ultimas?\s+|los?\s+|las?\s+)?(\d+)/);
-  if (limitMatch) {
-    limit = Number.parseInt(limitMatch[1], 10);
-  }
+  const tOrig = text.trim();
 
   // Detect "hoy"
   const onlyToday = t.includes("hoy") || t.includes("de hoy");
 
-  // Detect tipo
+  // ---- Step 1: Detect tipo (order matters — check compound phrases first) ----
   let tipo: PdfSegment["tipo"] = null;
+
+  // Check for "placas CE" / "placa CE" / "placas sin codigo" BEFORE plain "placas"
   if (
+    t.includes("placas ce") ||
+    t.includes("placa ce") ||
+    t.includes("placas sin codigo") ||
+    t.includes("placa sin codigo") ||
+    t.includes("sin codigo") ||
+    t.includes("sin barras")
+  ) {
+    tipo = "sin-codigo";
+  } else if (
     t.includes("matriculas") ||
     t.includes("matricula") ||
     t.includes("con codigo") ||
@@ -323,47 +350,56 @@ function parseOneSegment(text: string): PdfSegment | null {
     t.includes("barcode")
   ) {
     tipo = "con-codigo";
-  } else if (
-    t.includes("placas ce") ||
-    t.includes("placa ce") ||
-    t.includes("sin codigo") ||
-    t.includes("placas") ||
-    t.includes("placa")
-  ) {
-    tipo = "sin-codigo";
-  } else if (t.includes("advertencia")) {
+  } else if (t.includes("advertencias") || t.includes("advertencia")) {
     tipo = "advertencia";
+  } else if (t.includes("placas") || t.includes("placa")) {
+    // Generic "placas" without "CE" still maps to sin-codigo
+    tipo = "sin-codigo";
+  }
+
+  // ---- Step 2: Extract limit: "últimas N", "los N", "las N", "N" ----
+  let limit: number | null = null;
+  const limitMatch = t.match(/(?:ultimas?\s+|los?\s+|las?\s+)?(\d+)/);
+  if (limitMatch) {
+    limit = Number.parseInt(limitMatch[1], 10);
   }
 
   // If no recognizable type and no limit and no today, this segment probably isn't a valid filter
   if (tipo === null && limit === null && !onlyToday) return null;
 
-  // Extract provider: text after "de [proveedor]" (excluding tipo keywords)
-  let provider: string | null = null;
-  // Remove leading count expressions
-  const withoutCount = text
-    .replace(/^(ultimas?\s+\d+|las?\s+\d+|los?\s+\d+|\d+)\s*/i, "")
-    .replace(/^(ultimas?|las?|los?)\s+/i, "")
+  // ---- Step 3: Extract provider name ----
+  // Remove the leading count expression from original text
+  let remaining = tOrig
+    .replace(/^(?:ultimas?\s+\d+|las?\s+\d+|los?\s+\d+|\d+)\s*/i, "")
+    .replace(/^(?:ultimas?|las?|los?)\s+/i, "")
     .trim();
 
-  // Remove tipo keywords to isolate provider
+  // Remove tipo keywords (use both accented and unaccented variants)
   const tipoKeywordsOrig = [
     "matrículas",
     "matrícula",
     "matriculas",
     "matricula",
+    "placas CE",
+    "placa CE",
     "placas ce",
     "placa ce",
+    "placas sin código",
+    "placa sin código",
+    "placas sin codigo",
+    "placa sin codigo",
+    "sin código",
+    "sin codigo",
+    "con código",
+    "con codigo",
     "placas",
     "placa",
     "advertencias",
     "advertencia",
-    "con código",
-    "con codigo",
-    "sin código",
-    "sin codigo",
+    "sin barras",
+    "con barras",
+    "barcode",
   ];
-  let remaining = withoutCount;
   for (const kw of tipoKeywordsOrig) {
     const re = new RegExp(`\\b${kw}\\b`, "gi");
     remaining = remaining.replace(re, "").trim();
@@ -371,6 +407,7 @@ function parseOneSegment(text: string): PdfSegment | null {
 
   // remaining should now be: "de [proveedor]" or "del [proveedor]" or "[proveedor]"
   const deMatch = remaining.match(/^(?:de\s+|del\s+)(.+)$/i);
+  let provider: string | null = null;
   if (deMatch) {
     provider = deMatch[1].trim();
   } else if (remaining.length > 1 && !/^\d+$/.test(remaining)) {
@@ -393,8 +430,12 @@ function parseOneSegment(text: string): PdfSegment | null {
 function generateFilteredPdf(
   segmentResults: FilteredSegmentResult[],
   summaryLabel: string,
+  sinImagen = false,
 ) {
   const generatedAt = new Date().toLocaleString("es");
+  // Inherit sinImagen from segment results if any had it set (or passed directly)
+  const globalSinImagen =
+    sinImagen || segmentResults.some((r) => r.sinImagen === true);
 
   let allMatriculas = 0;
   let allPlacas = 0;
@@ -425,7 +466,11 @@ function generateFilteredPdf(
       const rows = entries
         .map((e) => {
           if (e.tipo === "con-codigo") {
-            return `<tr><td>${e.fecha}</td><td>${e.hora ?? "—"}</td><td>${e.operario ?? "—"}</td><td><code>${e.codigoInicio} → ${e.codigoFin}</code></td><td style="text-align:right;font-weight:600">${e.totalImagenes}</td></tr>`;
+            // When sinImagen is true, skip barcode svg — show only code text
+            const codeCell = globalSinImagen
+              ? `<code>${e.codigoInicio} → ${e.codigoFin}</code>`
+              : `<code>${e.codigoInicio} → ${e.codigoFin}</code>`;
+            return `<tr><td>${e.fecha}</td><td>${e.hora ?? "—"}</td><td>${e.operario ?? "—"}</td><td>${codeCell}</td><td style="text-align:right;font-weight:600">${e.totalImagenes}</td></tr>`;
           }
           return `<tr><td>${e.fecha}</td><td>${e.hora ?? "—"}</td><td>${e.operario ?? "—"}</td><td>${e.nombre ?? "Sin nombre"}</td><td style="text-align:right;font-weight:600">${e.totalImagenes}</td></tr>`;
         })
@@ -442,10 +487,15 @@ function generateFilteredPdf(
     })
     .join("\n");
 
-  const barcodeScript = segmentResults.some(
-    (r) => !r.notFound && r.segment.tipo === "con-codigo",
-  )
-    ? `<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"><\/script>`
+  // Only include barcode script if NOT sinImagen (no images needed)
+  const barcodeScript =
+    !globalSinImagen &&
+    segmentResults.some((r) => !r.notFound && r.segment.tipo === "con-codigo")
+      ? `<script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"><\/script>`
+      : "";
+
+  const sinImagenNote = globalSinImagen
+    ? `<p class="note">📄 PDF generado sin imágenes de códigos de barras (solo datos y totales)</p>`
     : "";
 
   const summarySection = `
@@ -466,6 +516,7 @@ ${barcodeScript}
   h1{font-size:22px;margin-bottom:4px;color:#1a1a2e}
   h2{font-size:15px;margin:28px 0 10px;color:#333;border-left:4px solid #f59e0b;padding-left:10px;background:#fffbeb;padding:6px 10px;border-radius:0 6px 6px 0}
   .sub{font-size:12px;color:#666;margin-bottom:28px}
+  .note{font-size:11px;color:#666;background:#f5f5f5;border:1px solid #ddd;border-radius:6px;padding:8px 12px;margin-bottom:20px}
   section{margin-bottom:32px;page-break-inside:avoid}
   table{width:100%;border-collapse:collapse;font-size:12px;margin-top:8px}
   th{background:#f5f5f5;text-align:left;padding:8px 10px;border-bottom:2px solid #ddd;font-size:11px;text-transform:uppercase;letter-spacing:.04em}
@@ -486,6 +537,7 @@ ${barcodeScript}
 </head><body>
 <h1>PDF — ${summaryLabel}</h1>
 <p class="sub">Generado el ${generatedAt}</p>
+${sinImagenNote}
 ${sectionHtml}
 ${summarySection}
 <script>window.onload=()=>{window.print();}<\/script>
@@ -710,16 +762,28 @@ function buildBotResponse(
     msg.includes("imprime") ||
     msg.includes("imprimir");
 
+  // Also treat "sin imagen" + pdf-related content as a filtered request
+  const hasSinImagen =
+    msg.includes("sin imagen") ||
+    msg.includes("sin imagenes") ||
+    msg.includes("sin fotos") ||
+    msg.includes("solo total") ||
+    msg.includes("solo datos");
+
   const hasFilterKeyword =
     msg.includes("placa") ||
     msg.includes("matricula") ||
     msg.includes("advertencia") ||
     msg.includes("proveedor") ||
     msg.includes("ultimas") ||
-    msg.includes("últimas") ||
-    /\d+\s+(placa|matricula|advertencia)/.test(msg);
+    msg.includes("historial") ||
+    msg.includes("hacer") ||
+    msg.includes("hazme") ||
+    msg.includes("genera") ||
+    msg.includes("generar") ||
+    /\d+\s*(placa|matricula|advertencia)/.test(msg);
 
-  if (hasPdfKeyword && hasFilterKeyword) {
+  if (hasPdfKeyword && (hasFilterKeyword || hasSinImagen)) {
     // Try to parse segments
     const segmentResults = parsePdfSegments(userText, historial);
 
@@ -727,6 +791,7 @@ function buildBotResponse(
       // Build confirmation text
       const confirmParts: string[] = [];
       const notFoundParts: string[] = [];
+      const globalSinImagen = segmentResults.some((r) => r.sinImagen);
 
       for (const r of segmentResults) {
         const tipoLabel =
@@ -740,18 +805,17 @@ function buildBotResponse(
         const provLabel = r.segment.provider
           ? ` de **${r.segment.provider}**`
           : "";
-        const limitLabel = r.segment.limit
-          ? `las ${r.segment.limit} últimas `
-          : "";
+        const limitLabel = r.segment.limit ? `${r.segment.limit} ` : "";
         const todayLabel = r.segment.onlyToday ? " de hoy" : "";
 
         if (r.notFound) {
+          const provName = r.segment.provider ?? "";
           notFoundParts.push(
-            `⚠️ No encontré registros de ${limitLabel}${tipoLabel}${provLabel}${todayLabel} en el historial.`,
+            `⚠️ No encontré registros de ${limitLabel}${tipoLabel}${provLabel}${todayLabel} en el historial.${provName ? `\n   ¿Quieres buscar sin filtrar por proveedor "${provName}"?` : ""}`,
           );
         } else {
           confirmParts.push(
-            `✅ **${r.entries.length} ${tipoLabel}**${provLabel}${todayLabel} → ${r.entries.reduce((s, e) => s + e.totalImagenes, 0).toLocaleString("es")} unidades`,
+            `✅ **${r.entries.length} registros de ${tipoLabel}**${provLabel}${todayLabel} → ${r.entries.reduce((s, e) => s + e.totalImagenes, 0).toLocaleString("es")} unidades`,
           );
         }
       }
@@ -761,14 +825,16 @@ function buildBotResponse(
       if (!hasResults) {
         const notFoundText = notFoundParts.join("\n");
         return {
-          text: `No encontré registros para generar el PDF:\n\n${notFoundText}\n\nAsegúrate de que los registros existen en el historial y que el nombre del proveedor coincide.`,
+          text: `No encontré registros para generar el PDF:\n\n${notFoundText}\n\nAsegúrate de que los registros existen en el historial y que el nombre del proveedor coincide exactamente.`,
         };
       }
 
       const summaryParts = confirmParts.join("\n");
       const notFoundText =
         notFoundParts.length > 0 ? `\n\n${notFoundParts.join("\n")}` : "";
-      const filteredEntries = segmentResults.flatMap((r) => r.entries);
+      const sinImagenNote = globalSinImagen
+        ? "\n\n📄 *PDF sin imágenes de códigos de barras*"
+        : "";
       const summaryLabel = segmentResults
         .filter((r) => !r.notFound)
         .map((r) => {
@@ -787,13 +853,15 @@ function buildBotResponse(
         .join(" + ");
 
       return {
-        text: `Generando PDF con:\n\n${summaryParts}${notFoundText}\n\nPulsa el botón para abrir el PDF.`,
+        text: `Generando PDF con:\n\n${summaryParts}${notFoundText}${sinImagenNote}\n\nPulsa el botón para abrir el PDF.`,
         action: {
           type: "pdf",
           label: "Generar PDF filtrado",
           handler: "filtered",
-          filteredEntries,
+          filteredEntries: segmentResults.flatMap((r) => r.entries),
+          segmentResults,
           summaryLabel,
+          sinImagen: globalSinImagen,
         },
       };
     }
@@ -1299,14 +1367,19 @@ export default function ChatPage({
 
   useEffect(() => {
     try {
-      // Serialize only safe fields (exclude filteredEntries to avoid localStorage bloat)
+      // Serialize only safe fields (exclude filteredEntries and segmentResults to avoid localStorage bloat)
       const toSave = messages.map((m) => {
         if (
           m.action?.type === "pdf" &&
           (m.action as PdfAction).handler === "filtered"
         ) {
-          const { filteredEntries: _fe, ...rest } = m.action as PdfAction;
+          const {
+            filteredEntries: _fe,
+            segmentResults: _sr,
+            ...rest
+          } = m.action as PdfAction;
           void _fe;
+          void _sr;
           return { ...m, action: rest };
         }
         return m;
@@ -1352,29 +1425,43 @@ export default function ChatPage({
     const lc = getFromLS<string>("lastGeneratedCode", "");
 
     if (action.handler === "filtered") {
-      const entries = action.filteredEntries ?? [];
-      if (entries.length === 0) {
-        addMessage({
-          role: "bot",
-          text: "⚠️ No hay entradas para generar el PDF filtrado. Los datos del chat anterior pueden haberse perdido al recargar la página. Por favor vuelve a pedir el PDF.",
-        });
-        return;
-      }
-      // Build fake segment results from the flat entries list for the PDF generator
-      const segResults: FilteredSegmentResult[] = [
-        {
-          segment: {
-            tipo: null,
-            provider: null,
-            limit: null,
-            onlyToday: false,
-            raw: action.summaryLabel ?? "filtrado",
+      // Prefer stored segmentResults (full metadata), fall back to flat entries list
+      if (action.segmentResults && action.segmentResults.length > 0) {
+        generateFilteredPdf(
+          action.segmentResults,
+          action.summaryLabel ?? "PDF Filtrado",
+          action.sinImagen ?? false,
+        );
+      } else {
+        const entries = action.filteredEntries ?? [];
+        if (entries.length === 0) {
+          addMessage({
+            role: "bot",
+            text: "⚠️ No hay entradas para generar el PDF filtrado. Los datos del chat anterior pueden haberse perdido al recargar la página. Por favor vuelve a pedir el PDF.",
+          });
+          return;
+        }
+        // Build segment results from the flat entries list as fallback
+        const segResults: FilteredSegmentResult[] = [
+          {
+            segment: {
+              tipo: null,
+              provider: null,
+              limit: null,
+              onlyToday: false,
+              raw: action.summaryLabel ?? "filtrado",
+            },
+            entries,
+            notFound: false,
+            sinImagen: action.sinImagen ?? false,
           },
-          entries,
-          notFound: false,
-        },
-      ];
-      generateFilteredPdf(segResults, action.summaryLabel ?? "PDF Filtrado");
+        ];
+        generateFilteredPdf(
+          segResults,
+          action.summaryLabel ?? "PDF Filtrado",
+          action.sinImagen ?? false,
+        );
+      }
     } else if (action.handler === "resumen") {
       generateResumenPdf(historial, pedidos, semana, objetivo, lc);
     } else if (
